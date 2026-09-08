@@ -14,7 +14,7 @@
 
 enum {
     COLS = 10, ROWS = 20, PIECES = 7,
-    MAX_PARTICLES = 640, MAX_WAVES = 32, MAX_SCORE_POPUPS = 96
+    MAX_PARTICLES = 1024, MAX_WAVES = 48, MAX_SCORE_POPUPS = 128
 };
 enum {
     SPECIAL_NONE, SPECIAL_BOMB, SPECIAL_LASER, SPECIAL_ROCKET,
@@ -106,6 +106,11 @@ static double perfect_clear_timer;
 static bool perfect_clear_candidate;
 static double overdrive_time;
 static double overdrive_banner_timer;
+static int flow_streak;
+static double flow_display_timer;
+static bool rescue_shield;
+static int next_shield_lines;
+static double shield_banner_timer;
 static ScorePopup score_popups[MAX_SCORE_POPUPS];
 static int score_popup_cursor;
 static Particle particles[MAX_PARTICLES];
@@ -171,25 +176,50 @@ static void start_special_impact(int x, int y, int special, int variant) {
     wave->type = special;
     wave->variant = variant;
 
-    double power = special == SPECIAL_ROCKET ? 12.0
-        : (special == SPECIAL_METEOR ? 9.5
-        : (special == SPECIAL_BOMB ? 10.0
-        : (special == SPECIAL_PRISM ? 8.0
-        : (special == SPECIAL_PULSE ? 8.5
-        : (special == SPECIAL_THUNDER ? 7.5 : 6.5)))));
+    double power = special == SPECIAL_ROCKET ? 16.0
+        : (special == SPECIAL_METEOR ? 13.0
+        : (special == SPECIAL_BOMB ? 14.0
+        : (special == SPECIAL_PRISM ? 10.5
+        : (special == SPECIAL_PULSE ? 11.5
+        : (special == SPECIAL_THUNDER ? 10.0 : 9.0)))));
     if (shake_strength < power) shake_strength = power;
-    else shake_strength += 1.5;
-    if (shake_strength > 13.0) shake_strength = 13.0;
-    shake_time = special == SPECIAL_ROCKET ? 0.46
-        : (special == SPECIAL_METEOR ? 0.36
-        : (special == SPECIAL_BOMB ? 0.38
-        : (special == SPECIAL_PULSE ? 0.34 : 0.27)));
-    flash_time = special == SPECIAL_ROCKET ? 0.20
-        : (special == SPECIAL_METEOR ? 0.18
-        : (special == SPECIAL_BOMB ? 0.18
-        : (special == SPECIAL_PRISM ? 0.20
-        : (special == SPECIAL_PULSE ? 0.17 : 0.14))));
+    else shake_strength += 2.2;
+    if (shake_strength > 18.0) shake_strength = 18.0;
+    shake_time = special == SPECIAL_ROCKET ? 0.58
+        : (special == SPECIAL_METEOR ? 0.48
+        : (special == SPECIAL_BOMB ? 0.52
+        : (special == SPECIAL_PULSE ? 0.44 : 0.36)));
+    flash_time = special == SPECIAL_ROCKET ? 0.28
+        : (special == SPECIAL_METEOR ? 0.24
+        : (special == SPECIAL_BOMB ? 0.25
+        : (special == SPECIAL_PRISM ? 0.26
+        : (special == SPECIAL_PULSE ? 0.23 : 0.20))));
     flash_kind = special;
+
+    Color spark = {0.55, 0.95, 1.0};
+    if (special == SPECIAL_BOMB || special == SPECIAL_ROCKET)
+        spark = (Color){1.0, 0.52, 0.08};
+    else if (special == SPECIAL_METEOR || special == SPECIAL_PRISM)
+        spark = (Color){0.82, 0.42, 1.0};
+    else if (special == SPECIAL_PULSE)
+        spark = (Color){1.0, 0.88, 0.16};
+    else if (special == SPECIAL_DIAGONAL)
+        spark = (Color){0.32, 1.0, 0.55};
+    for (int i = 0; i < 22; ++i) {
+        Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
+        p->active = true;
+        p->x = wave->x + (random_unit() - 0.5) * 10.0;
+        p->y = wave->y + (random_unit() - 0.5) * 10.0;
+        double direction_x = random_unit() - 0.5;
+        double direction_y = random_unit() - 0.5;
+        double burst = 230.0 + random_unit() * 260.0;
+        p->vx = direction_x * burst;
+        p->vy = direction_y * burst + 90.0;
+        p->max_life = 0.30 + random_unit() * 0.34;
+        p->life = p->max_life;
+        p->size = 2.0 + random_unit() * 4.5;
+        p->color = i % 4 == 0 ? (Color){1.0, 1.0, 1.0} : spark;
+    }
 }
 
 static void spawn_fragments(int x, int y, int color_index, int special,
@@ -197,8 +227,8 @@ static void spawn_fragments(int x, int y, int color_index, int special,
     if (color_index <= 0 || color_index > PIECES) return;
     double center_x = BOARD_X + (x + 0.5) * CELL;
     double center_y = BOARD_Y + (ROWS - y - 0.5) * CELL;
-    int fragment_count = special == SPECIAL_ROCKET ? 10
-        : (special == SPECIAL_METEOR ? 9 : 7);
+    int fragment_count = special == SPECIAL_ROCKET ? 16
+        : (special == SPECIAL_METEOR ? 14 : 10);
     for (int i = 0; i < fragment_count; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
@@ -207,21 +237,21 @@ static void spawn_fragments(int x, int y, int color_index, int special,
         if (special == SPECIAL_BOMB || special == SPECIAL_ROCKET ||
             special == SPECIAL_METEOR || special == SPECIAL_PRISM ||
             special == SPECIAL_PULSE || special == SPECIAL_THUNDER) {
-            double force = special == SPECIAL_ROCKET ? 155.0
-                : (special == SPECIAL_METEOR ? 135.0 : 105.0);
-            double scatter = special == SPECIAL_ROCKET ? 270.0
-                : (special == SPECIAL_METEOR ? 235.0 : 190.0);
+            double force = special == SPECIAL_ROCKET ? 205.0
+                : (special == SPECIAL_METEOR ? 180.0 : 145.0);
+            double scatter = special == SPECIAL_ROCKET ? 350.0
+                : (special == SPECIAL_METEOR ? 310.0 : 255.0);
             p->vx = (x - source_x) * force +
                     (random_unit() - 0.5) * scatter;
             p->vy = -(y - source_y) * force + 70.0 +
                     (random_unit() - 0.5) * scatter;
         } else {
-            p->vx = (random_unit() - 0.5) * 150.0;
-            p->vy = 120.0 + random_unit() * 210.0;
+            p->vx = (random_unit() - 0.5) * 220.0;
+            p->vy = 150.0 + random_unit() * 280.0;
         }
         p->max_life = 0.52 + random_unit() * 0.38;
         p->life = p->max_life;
-        p->size = 3.0 + random_unit() * 5.0;
+        p->size = 3.0 + random_unit() * 6.5;
         p->color = piece_colors[color_index];
     }
 }
@@ -229,7 +259,7 @@ static void spawn_fragments(int x, int y, int color_index, int special,
 static void spawn_line_fragments(int x, int y, int color_index) {
     double center_x = BOARD_X + (x + 0.5) * CELL;
     double center_y = BOARD_Y + (ROWS - y - 0.5) * CELL;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 5; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
         p->x = center_x + (random_unit() - 0.5) * 18.0;
@@ -286,7 +316,34 @@ static void check_perfect_clear(void) {
                       BOARD_Y + ROWS * CELL / 2.0,
                       bonus, (Color){1.0, 0.86, 0.24});
     perfect_clear_timer = 1.8;
+    rescue_shield = true;
+    shield_banner_timer = 2.0;
     perfect_clear_candidate = false;
+}
+
+static bool activate_rescue_shield(void) {
+    if (!rescue_shield) return false;
+    rescue_shield = false;
+    shield_banner_timer = 2.2;
+    start_special_impact(COLS / 2, 2, SPECIAL_THUNDER, 2);
+    flash_time = 0.34;
+    flash_kind = SPECIAL_THUNDER;
+    shake_time = 0.58;
+    if (shake_strength < 15.0) shake_strength = 15.0;
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < COLS; ++x) {
+            effect_kind[y][x] = SPECIAL_THUNDER;
+            effect_variant[y][x] = (unsigned char)((x + y) % 3);
+            effect_timer[y][x] = 0.62;
+            if (board[y][x])
+                spawn_fragments(x, y, board[y][x], SPECIAL_THUNDER,
+                                COLS / 2, 2);
+            board[y][x] = 0;
+            board_special[y][x] = SPECIAL_NONE;
+            fall_offset[y][x] = 0.0;
+        }
+    }
+    return true;
 }
 
 static void trigger_garbage_surge(void) {
@@ -296,8 +353,11 @@ static void trigger_garbage_surge(void) {
     if (shake_strength < 8.0) shake_strength = 8.0;
     for (int x = 0; x < COLS; ++x) {
         if (board[0][x]) {
-            game_over = true;
-            return;
+            if (!activate_rescue_shield()) {
+                game_over = true;
+                return;
+            }
+            break;
         }
     }
     for (int y = 0; y < ROWS - 1; ++y) {
@@ -442,8 +502,11 @@ static void spawn_piece(void) {
     hold_used = false;
     advance_next_piece();
     if (!can_place(current.type, current.rotation, current.x, current.y)) {
-        game_over = true;
-        if (score > high_score) high_score = score;
+        if (!activate_rescue_shield() ||
+            !can_place(current.type, current.rotation, current.x, current.y)) {
+            game_over = true;
+            if (score > high_score) high_score = score;
+        }
     }
 }
 
@@ -489,6 +552,11 @@ static void reset_game(void) {
     perfect_clear_candidate = false;
     overdrive_time = 0.0;
     overdrive_banner_timer = 0.0;
+    flow_streak = 0;
+    flow_display_timer = 0.0;
+    rescue_shield = false;
+    next_shield_lines = 10;
+    shield_banner_timer = 0.0;
     hold_piece = -1;
     hold_special_index = -1;
     hold_special_type = SPECIAL_NONE;
@@ -766,7 +834,7 @@ static int clear_full_lines(void) {
         normal_clear_active = true;
         normal_clear_timer = 0.34;
         pending_clear_count = cleared;
-        normal_clear_variant = rand() % 3;
+        normal_clear_variant = rand() % 4;
         memcpy(pending_clear_rows, clear_row, sizeof(pending_clear_rows));
         for (int y = 0; y < ROWS; ++y) {
             if (!clear_row[y]) continue;
@@ -793,6 +861,11 @@ static int resolve_completed_lines(void) {
     line_points = award_points(line_points);
     add_focus_charge(cleared * 24.0);
     lines += cleared;
+    while (lines >= next_shield_lines) {
+        rescue_shield = true;
+        shield_banner_timer = 2.0;
+        next_shield_lines += 10;
+    }
     level = 1 + lines / 10 + (int)(elapsed_time / 35.0);
     if (normal_clear_active) {
         int sum_y = 0;
@@ -871,7 +944,7 @@ static void complete_normal_line_clear(void) {
 static void spawn_rocket_trail(void) {
     double center_x = BOARD_X + (rocket.column + 0.5) * CELL;
     double center_y = BOARD_Y + (ROWS - rocket.y - 0.5) * CELL;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 5; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
         p->x = center_x + (random_unit() - 0.5) * 8.0;
@@ -960,11 +1033,28 @@ static void lock_piece(void) {
         }
     }
     if (above_top) {
-        game_over = true;
-        if (score > high_score) high_score = score;
+        flow_streak = 0;
+        if (activate_rescue_shield()) {
+            spawn_piece();
+        } else {
+            game_over = true;
+            if (score > high_score) high_score = score;
+        }
         return;
     }
-    resolve_completed_lines();
+    int cleared = resolve_completed_lines();
+    if (cleared > 0) {
+        ++flow_streak;
+        flow_display_timer = 1.5;
+        if (flow_streak >= 2) {
+            int bonus = award_points((flow_streak - 1) * 75 * level);
+            spawn_score_popup(BOARD_X + COLS * CELL / 2.0,
+                              BOARD_Y + ROWS * CELL - 105.0,
+                              bonus, (Color){0.42, 1.0, 0.82});
+        }
+    } else {
+        flow_streak = 0;
+    }
     if (normal_clear_active) return;
     if (last_clear_started_physics) begin_settling_or_spawn();
     else spawn_piece();
@@ -1076,6 +1166,14 @@ static void update_game(double dt) {
     if (overdrive_banner_timer > 0.0) {
         overdrive_banner_timer -= dt;
         if (overdrive_banner_timer < 0.0) overdrive_banner_timer = 0.0;
+    }
+    if (flow_display_timer > 0.0) {
+        flow_display_timer -= dt;
+        if (flow_display_timer < 0.0) flow_display_timer = 0.0;
+    }
+    if (shield_banner_timer > 0.0) {
+        shield_banner_timer -= dt;
+        if (shield_banner_timer < 0.0) shield_banner_timer = 0.0;
     }
     if (board_rise_offset < 0.0) {
         board_rise_offset += (CELL / 0.34) * dt;
@@ -1289,7 +1387,12 @@ static void draw_special_marker(CGContextRef ctx, double x, double y, int size,
     CGRect badge = CGRectMake(x + inset, y + inset,
                               size - inset * 2.0, size - inset * 2.0);
     fill_rect(ctx, badge.origin.x - 2, badge.origin.y - 2,
-              badge.size.width + 4, badge.size.height + 4, glow, 0.38 * alpha);
+              badge.size.width + 4, badge.size.height + 4, glow, 0.58 * alpha);
+    double marker_pulse = ((uint32_t)(visual_time * 10.0 + x + y) % 2u)
+        ? 0.34 : 0.18;
+    fill_rect(ctx, badge.origin.x - 4, badge.origin.y - 4,
+              badge.size.width + 8, badge.size.height + 8,
+              glow, marker_pulse * alpha);
     fill_rect(ctx, badge.origin.x, badge.origin.y,
               badge.size.width, badge.size.height, dark, 0.94 * alpha);
     CGContextSetRGBStrokeColor(ctx, glow.r, glow.g, glow.b, alpha);
@@ -1408,7 +1511,7 @@ static void draw_clearing_block(CGContextRef ctx, int gx, int gy,
         width = (CELL - 4) * (0.72 + 0.28 * remaining);
         height = (CELL - 4) * (0.08 + 0.92 * remaining * remaining);
         x_shift = (gx % 2 ? 1.0 : -1.0) * progress * 11.0;
-    } else {
+    } else if (normal_clear_variant == 2) {
         double distance = gx < 5 ? 4.5 - gx : gx - 4.5;
         double delayed = progress - distance * 0.045;
         if (delayed < 0.0) delayed = 0.0;
@@ -1417,6 +1520,15 @@ static void draw_clearing_block(CGContextRef ctx, int gx, int gy,
         width = (CELL - 4) * (0.12 + 0.88 * local_remaining);
         height = width;
         x_shift = (gx < 5 ? -1.0 : 1.0) * (1.0 - local_remaining) * 8.0;
+    } else {
+        double delay = (double)((gx * 7 + gy * 3) % COLS) * 0.045;
+        double dissolve = progress - delay;
+        if (dissolve < 0.0) dissolve = 0.0;
+        if (dissolve > 0.58) dissolve = 0.58;
+        local_remaining = 1.0 - dissolve / 0.58;
+        width = (CELL - 4) * (0.18 + 0.82 * local_remaining);
+        height = (CELL - 4) * (0.18 + 0.82 * local_remaining);
+        x_shift = (gx % 2 ? 1.0 : -1.0) * (1.0 - local_remaining) * 13.0;
     }
     double x = BOARD_X + gx * CELL + CELL / 2.0 - width / 2.0 + x_shift;
     double y = BOARD_Y + (ROWS - 1 - gy) * CELL + CELL / 2.0 - height / 2.0;
@@ -1660,6 +1772,14 @@ static void draw_particles(CGContextRef ctx) {
         if (!p->active) continue;
         double alpha = p->life / p->max_life;
         double size = p->size * (0.45 + 0.55 * alpha);
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, p->x, p->y);
+        CGContextAddLineToPoint(ctx, p->x - p->vx * 0.035,
+                                p->y - p->vy * 0.035);
+        CGContextSetRGBStrokeColor(ctx, p->color.r, p->color.g, p->color.b,
+                                   alpha * 0.55);
+        CGContextSetLineWidth(ctx, size * 0.55);
+        CGContextStrokePath(ctx);
         fill_rect(ctx, p->x - size / 2.0, p->y - size / 2.0,
                   size, size, p->color, alpha);
         Color spark = {1.0, 1.0, 1.0};
@@ -1710,7 +1830,7 @@ static void draw_normal_clear_sweep(CGContextRef ctx) {
                       glow, 0.55 * (1.0 - progress));
             fill_rect(ctx, BOARD_X + half + travel - 9, py, 18, CELL,
                       glow, 0.55 * (1.0 - progress));
-        } else {
+        } else if (normal_clear_variant == 2) {
             for (int x = 0; x < COLS; ++x) {
                 double phase = progress * 12.0 - x;
                 if (phase < 0.0 || phase > 2.2) continue;
@@ -1718,6 +1838,16 @@ static void draw_normal_clear_sweep(CGContextRef ctx) {
                                               : (2.2 - phase) / 1.1;
                 fill_rect(ctx, BOARD_X + x * CELL + 3, py + 3,
                           CELL - 6, CELL - 6, glow, 0.72 * strength);
+            }
+        } else {
+            for (int x = 0; x < COLS; ++x) {
+                double phase = progress * 15.0 - ((x * 7 + y * 3) % COLS);
+                if (phase < 0.0 || phase > 3.0) continue;
+                double strength = 1.0 - phase / 3.0;
+                Color pixel = piece_colors[1 + (x + y) % PIECES];
+                fill_rect(ctx, BOARD_X + x * CELL + 5,
+                          py + 4 + (x % 3) * 6, CELL - 10, 5,
+                          pixel, 0.85 * strength);
             }
         }
     }
@@ -1777,6 +1907,11 @@ static void draw_shockwaves(CGContextRef ctx) {
             CGContextStrokeRect(ctx, wave_rect);
         else
             CGContextStrokeEllipseInRect(ctx, wave_rect);
+        double echo = radius * 1.22;
+        CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b, alpha * 0.34);
+        CGContextSetLineWidth(ctx, 2.0);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(wave->x - echo,
+            wave->y - echo, echo * 2.0, echo * 2.0));
         if (wave->variant == 2) {
             CGContextSetLineWidth(ctx, 3.0);
             CGContextMoveToPoint(ctx, wave->x - radius, wave->y);
@@ -1839,6 +1974,14 @@ static void render_game(CGContextRef ctx) {
         CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 11, BOARD_Y - 11,
                                              COLS * CELL + 22,
                                              ROWS * CELL + 22));
+    }
+    if (rescue_shield) {
+        double shield_alpha = ((uint32_t)(visual_time * 6.0) % 2u) ? 0.82 : 0.48;
+        CGContextSetRGBStrokeColor(ctx, 0.35, 1.0, 0.72, shield_alpha);
+        CGContextSetLineWidth(ctx, 3.0);
+        CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 14, BOARD_Y - 14,
+                                             COLS * CELL + 28,
+                                             ROWS * CELL + 28));
     }
     fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL, panel, 1.0);
 
@@ -1907,7 +2050,7 @@ static void render_game(CGContextRef ctx) {
         double alpha = flash_time / maximum;
         if (alpha > 1.0) alpha = 1.0;
         fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
-                  flash, alpha * 0.28);
+                  flash, alpha * 0.42);
     }
     if (danger_flash_time > 0.0) {
         double alpha = danger_flash_time / 0.22;
@@ -1934,6 +2077,13 @@ static void render_game(CGContextRef ctx) {
         draw_centered(ctx, chain_text, BOARD_X + COLS * CELL / 2.0,
                       BOARD_Y + ROWS * CELL - 42, 3, chain_color);
     }
+    if (flow_display_timer > 0.0 && flow_streak > 0) {
+        char flow_text[24];
+        snprintf(flow_text, sizeof(flow_text), "FLOW %dX", flow_streak);
+        draw_centered(ctx, flow_text, BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL - 132, 3,
+                      (Color){0.42, 1.0, 0.82});
+    }
     if (focus_time > 0.0)
         draw_centered(ctx, "FOCUS 2X", BOARD_X + COLS * CELL / 2.0,
                       BOARD_Y + ROWS * CELL - 72, 3,
@@ -1950,6 +2100,11 @@ static void render_game(CGContextRef ctx) {
                       BOARD_Y + ROWS * CELL - 102, 2,
                       (Color){0.55, 0.92, 1.0});
     }
+    if (shield_banner_timer > 0.0)
+        draw_centered(ctx, rescue_shield ? "SHIELD READY" : "SHIELD SAVE",
+                      BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL / 2.0 - 24, 3,
+                      (Color){0.38, 1.0, 0.74});
 
     const double side_x = 395;
     draw_text(ctx, "TETRIS", side_x, 625, 7, accent);
@@ -1983,7 +2138,9 @@ static void render_game(CGContextRef ctx) {
                      side_x + 115, 285, 105, 90, 18);
 
     draw_text(ctx, "8 SPECIALS", side_x, 252, 2, piece_colors[5]);
-    draw_text(ctx, "CHAIN BONUS", 525, 252, 2, piece_colors[1]);
+    draw_text(ctx, rescue_shield ? "SHIELD READY" : "FLOW BONUS",
+              rescue_shield ? 515 : 525, 252, 2,
+              rescue_shield ? (Color){0.38, 1.0, 0.74} : piece_colors[1]);
     draw_text(ctx, "CONTROLS", side_x, 220, 3, muted);
     draw_text(ctx, "A D     MOVE", side_x, 194, 2, white);
     draw_text(ctx, "S       DOWN", side_x, 174, 2, white);
