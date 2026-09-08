@@ -66,16 +66,13 @@ static FallingPiece current;
 static int next_piece;
 static int next_special_index;
 static int next_special_type;
-static int hold_piece;
-static int hold_special_index;
-static int hold_special_type;
-static bool hold_used;
 static int bag[PIECES];
 static int bag_pos = PIECES;
 static int score;
 static int lines;
 static int level;
 static int high_score;
+static bool high_score_dirty;
 static bool paused;
 static bool game_over;
 static bool running = true;
@@ -159,6 +156,41 @@ static const Color piece_colors[PIECES + 1] = {
 
 static double random_unit(void) {
     return (double)rand() / (double)RAND_MAX;
+}
+
+static bool get_high_score_path(char *path, size_t capacity, bool temporary) {
+    const char *user_home = getenv("HOME");
+    if (!user_home || !user_home[0]) return false;
+    int length = snprintf(path, capacity, "%s/.adhdtetris_highscore%s",
+                          user_home, temporary ? ".tmp" : "");
+    return length > 0 && (size_t)length < capacity;
+}
+
+static void load_high_score(void) {
+    char path[1024];
+    if (!get_high_score_path(path, sizeof(path), false)) return;
+    FILE *file = fopen(path, "r");
+    if (!file) return;
+    int saved_score = 0;
+    if (fscanf(file, "%d", &saved_score) == 1 && saved_score > 0)
+        high_score = saved_score;
+    fclose(file);
+}
+
+static void save_high_score(void) {
+    if (!high_score_dirty) return;
+    char path[1024], temporary_path[1024];
+    if (!get_high_score_path(path, sizeof(path), false) ||
+        !get_high_score_path(temporary_path, sizeof(temporary_path), true))
+        return;
+    FILE *file = fopen(temporary_path, "w");
+    if (!file) return;
+    bool written = fprintf(file, "%d\n", high_score) > 0;
+    if (fclose(file) != 0) written = false;
+    if (written && rename(temporary_path, path) == 0)
+        high_score_dirty = false;
+    else
+        unlink(temporary_path);
 }
 
 static void start_special_impact(int x, int y, int special, int variant) {
@@ -295,7 +327,10 @@ static int award_points(int base_points) {
     int multiplier = overdrive_time > 0.0 ? 3 : (focus_time > 0.0 ? 2 : 1);
     int awarded = base_points * multiplier;
     score += awarded;
-    if (score > high_score) high_score = score;
+    if (score > high_score) {
+        high_score = score;
+        high_score_dirty = true;
+    }
     return awarded;
 }
 
@@ -499,7 +534,6 @@ static void spawn_piece(void) {
     current.y = -1;
     current.special_index = next_special_index;
     current.special_type = next_special_type;
-    hold_used = false;
     advance_next_piece();
     if (!can_place(current.type, current.rotation, current.x, current.y)) {
         if (!activate_rescue_shield() ||
@@ -511,6 +545,7 @@ static void spawn_piece(void) {
 }
 
 static void reset_game(void) {
+    save_high_score();
     memset(board, 0, sizeof(board));
     memset(board_special, 0, sizeof(board_special));
     memset(effect_kind, 0, sizeof(effect_kind));
@@ -557,10 +592,6 @@ static void reset_game(void) {
     rescue_shield = false;
     next_shield_lines = 10;
     shield_banner_timer = 0.0;
-    hold_piece = -1;
-    hold_special_index = -1;
-    hold_special_type = SPECIAL_NONE;
-    hold_used = false;
     score_popup_cursor = 0;
     particle_cursor = 0;
     wave_cursor = 0;
@@ -1083,39 +1114,6 @@ static void rotate_piece(int direction) {
     }
 }
 
-static void hold_current_piece(void) {
-    if (hold_used) return;
-    int saved_piece = current.type;
-    int saved_index = current.special_index;
-    int saved_special = current.special_type;
-
-    if (hold_piece < 0) {
-        hold_piece = saved_piece;
-        hold_special_index = saved_index;
-        hold_special_type = saved_special;
-        current.type = next_piece;
-        current.special_index = next_special_index;
-        current.special_type = next_special_type;
-        advance_next_piece();
-    } else {
-        current.type = hold_piece;
-        current.special_index = hold_special_index;
-        current.special_type = hold_special_type;
-        hold_piece = saved_piece;
-        hold_special_index = saved_index;
-        hold_special_type = saved_special;
-    }
-    current.rotation = 0;
-    current.x = 3;
-    current.y = -1;
-    hold_used = true;
-    gravity_accumulator = 0.0;
-    if (!can_place(current.type, current.rotation, current.x, current.y)) {
-        game_over = true;
-        if (score > high_score) high_score = score;
-    }
-}
-
 static double gravity_delay(void) {
     double delay = 0.84 - (double)(level - 1) * 0.055;
     if (delay < 0.095) delay = 0.095;
@@ -1229,7 +1227,11 @@ static void update_game(double dt) {
             }
         }
     }
-    if (paused || game_over) return;
+    if (game_over) {
+        save_high_score();
+        return;
+    }
+    if (paused) return;
     if (overdrive_time > 0.0) {
         overdrive_time -= dt;
         if (overdrive_time < 0.0) overdrive_time = 0.0;
@@ -1294,7 +1296,6 @@ static void handle_key(unsigned short key) {
             break;
         case 13: case 7: rotate_piece(1); break;             /* W, X */
         case 6: rotate_piece(-1); break;                     /* Z */
-        case 8: hold_current_piece(); break;                 /* C */
         case 49: {                                           /* Space */
             int distance = 0;
             while (move_piece(0, 1)) ++distance;
@@ -2119,23 +2120,23 @@ static void render_game(CGContextRef ctx) {
     Color live_score = overdrive_time > 0.0 ? (Color){0.55, 0.94, 1.0}
         : (focus_time > 0.0 ? (Color){1.0, 0.84, 0.24} : white);
     draw_text(ctx, number, score_x, 513, score_scale, live_score);
-    draw_text(ctx, "LINES", side_x, 474, 3, muted);
+    draw_text(ctx, "LINES", side_x, 474, 2, muted);
     snprintf(number, sizeof(number), "%d", lines);
-    draw_text(ctx, number, side_x, 442, 4, white);
-    draw_text(ctx, "LEVEL", 515, 474, 3, muted);
+    draw_text(ctx, number, side_x, 444, 3, white);
+    draw_text(ctx, "LEVEL", 472, 474, 2, muted);
     snprintf(number, sizeof(number), "%d", level);
-    draw_text(ctx, number, 515, 442, 4, white);
+    draw_text(ctx, number, 472, 444, 3, white);
+    draw_text(ctx, "BEST", 560, 474, 2, (Color){1.0, 0.84, 0.24});
+    snprintf(number, sizeof(number), "%d", high_score);
+    int best_scale = strlen(number) <= 7 ? 2 : 1;
+    double best_x = side_x + 220.0 - text_width(number, best_scale);
+    draw_text(ctx, number, best_x, 446, best_scale,
+              (Color){1.0, 0.90, 0.40});
 
     draw_text(ctx, "NEXT", side_x, 390, 3, muted);
-    draw_text(ctx, "HOLD", side_x + 120, 390, 3,
-              hold_used ? (Color){0.30, 0.36, 0.46} : muted);
-    fill_rect(ctx, side_x, 285, 105, 90, panel, 1.0);
-    fill_rect(ctx, side_x + 115, 285, 105, 90, panel, 1.0);
+    fill_rect(ctx, side_x, 285, 220, 90, panel, 1.0);
     draw_preview(ctx, next_piece, next_special_index, next_special_type,
-                 side_x, 285, 105, 90, 18);
-    if (hold_piece >= 0)
-        draw_preview(ctx, hold_piece, hold_special_index, hold_special_type,
-                     side_x + 115, 285, 105, 90, 18);
+                 side_x, 285, 220, 90, 22);
 
     draw_text(ctx, "8 SPECIALS", side_x, 252, 2, piece_colors[5]);
     draw_text(ctx, rescue_shield ? "SHIELD READY" : "FLOW BONUS",
@@ -2145,12 +2146,10 @@ static void render_game(CGContextRef ctx) {
     draw_text(ctx, "A D     MOVE", side_x, 194, 2, white);
     draw_text(ctx, "S       DOWN", side_x, 174, 2, white);
     draw_text(ctx, "W X     ROTATE", side_x, 154, 2, white);
-    draw_text(ctx, "C       HOLD", side_x, 134, 2,
-              hold_used ? muted : white);
-    draw_text(ctx, "SPACE   DROP", side_x, 114, 2, white);
-    draw_text(ctx, "P       PAUSE", side_x, 94, 2, white);
-    draw_text(ctx, "R       RESTART", side_x, 74, 2, white);
-    draw_text(ctx, "E       FOCUS", side_x, 54, 2,
+    draw_text(ctx, "SPACE   DROP", side_x, 134, 2, white);
+    draw_text(ctx, "P       PAUSE", side_x, 114, 2, white);
+    draw_text(ctx, "R       RESTART", side_x, 94, 2, white);
+    draw_text(ctx, "E       FOCUS", side_x, 74, 2,
               focus_charge >= 100.0 || focus_time > 0.0
                   ? (Color){1.0, 0.84, 0.24} : muted);
     Color meter_border = {0.22, 0.28, 0.38};
@@ -2202,6 +2201,7 @@ static void send_void(id object, const char *selector) {
 
 int main(void) {
     srand((unsigned int)time(NULL));
+    load_high_score();
     reset_game();
 
     Class pool_class = (Class)objc_getClass("NSAutoreleasePool");
@@ -2291,5 +2291,6 @@ int main(void) {
     send_void(view, "release");
     send_void(window, "release");
     send_void(outer_pool, "drain");
+    save_high_score();
     return 0;
 }
