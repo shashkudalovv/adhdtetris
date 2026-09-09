@@ -19,7 +19,8 @@ enum {
 enum {
     SPECIAL_NONE, SPECIAL_BOMB, SPECIAL_LASER, SPECIAL_ROCKET,
     SPECIAL_CROSS, SPECIAL_PRISM, SPECIAL_METEOR,
-    SPECIAL_DIAGONAL, SPECIAL_DRILL, SPECIAL_PULSE, SPECIAL_THUNDER
+    SPECIAL_DIAGONAL, SPECIAL_DRILL, SPECIAL_PULSE, SPECIAL_THUNDER,
+    SPECIAL_CREEPER, SPECIAL_CHOCOLATE
 };
 enum { SCREEN_MAIN_MENU, SCREEN_SHOP, SCREEN_SETTINGS, SCREEN_GAME };
 
@@ -50,6 +51,11 @@ typedef struct {
     int column, mode;
     bool active;
 } Rocket;
+typedef struct {
+    double y;
+    int column;
+    bool active;
+} Creeper;
 typedef struct {
     double x, y, vy, life, max_life;
     int points;
@@ -114,11 +120,17 @@ static double shield_banner_timer;
 static double minecraft_time;
 static double minecraft_banner_timer;
 static double minecraft_flash_time;
+static double minecraft_creeper_timer;
+static double chocolate_time;
+static double chocolate_banner_timer;
+static double chocolate_flash_time;
+static double chocolate_melt_timer;
 static ScorePopup score_popups[MAX_SCORE_POPUPS];
 static int score_popup_cursor;
 static Particle particles[MAX_PARTICLES];
 static Shockwave shockwaves[MAX_WAVES];
 static Rocket rocket;
+static Creeper creeper;
 static int particle_cursor;
 static int wave_cursor;
 
@@ -231,9 +243,11 @@ static void save_settings(void) {
 }
 
 static void start_minecraft_event(void) {
+    chocolate_time = 0.0;
     minecraft_time = 20.0;
     minecraft_banner_timer = 2.6;
     minecraft_flash_time = 0.45;
+    minecraft_creeper_timer = 5.0;
     shake_time = 0.42;
     if (shake_strength < 9.0) shake_strength = 9.0;
     for (int i = 0; i < 84; ++i) {
@@ -252,6 +266,31 @@ static void start_minecraft_event(void) {
     }
 }
 
+static void start_chocolate_event(void) {
+    minecraft_time = 0.0;
+    creeper.active = false;
+    chocolate_time = 20.0;
+    chocolate_banner_timer = 2.6;
+    chocolate_flash_time = 0.45;
+    chocolate_melt_timer = 5.0;
+    shake_time = 0.34;
+    if (shake_strength < 7.5) shake_strength = 7.5;
+    for (int i = 0; i < 72; ++i) {
+        Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
+        p->active = true;
+        p->x = BOARD_X + random_unit() * COLS * CELL;
+        p->y = BOARD_Y + ROWS * CELL * 0.50 +
+               (random_unit() - 0.5) * 100.0;
+        p->vx = (random_unit() - 0.5) * 210.0;
+        p->vy = 80.0 + random_unit() * 230.0;
+        p->max_life = 0.55 + random_unit() * 0.50;
+        p->life = p->max_life;
+        p->size = 4.0 + random_unit() * 7.0;
+        p->color = i % 4 == 0 ? (Color){0.96, 0.68, 0.30}
+                              : (Color){0.42, 0.18, 0.09};
+    }
+}
+
 static void start_special_impact(int x, int y, int special, int variant) {
     Shockwave *wave = &shockwaves[wave_cursor++ % MAX_WAVES];
     wave->active = true;
@@ -263,6 +302,8 @@ static void start_special_impact(int x, int y, int special, int variant) {
         : (special == SPECIAL_PRISM ? 0.52
         : (special == SPECIAL_PULSE ? 0.48
         : (special == SPECIAL_THUNDER ? 0.42 : 0.34)))));
+    if (special == SPECIAL_CREEPER) wave->max_life = 0.58;
+    if (special == SPECIAL_CHOCOLATE) wave->max_life = 0.46;
     wave->life = wave->max_life;
     wave->type = special;
     wave->variant = variant;
@@ -273,6 +314,8 @@ static void start_special_impact(int x, int y, int special, int variant) {
         : (special == SPECIAL_PRISM ? 13.0
         : (special == SPECIAL_PULSE ? 14.5
         : (special == SPECIAL_THUNDER ? 12.5 : 11.0)))));
+    if (special == SPECIAL_CREEPER) power = 17.0;
+    if (special == SPECIAL_CHOCOLATE) power = 9.0;
     if (shake_strength < power) shake_strength = power;
     else shake_strength += 2.2;
     if (shake_strength > 22.0) shake_strength = 22.0;
@@ -280,11 +323,14 @@ static void start_special_impact(int x, int y, int special, int variant) {
         : (special == SPECIAL_METEOR ? 0.48
         : (special == SPECIAL_BOMB ? 0.52
         : (special == SPECIAL_PULSE ? 0.44 : 0.36)));
+    if (special == SPECIAL_CREEPER) shake_time = 0.52;
     flash_time = special == SPECIAL_ROCKET ? 0.28
         : (special == SPECIAL_METEOR ? 0.24
         : (special == SPECIAL_BOMB ? 0.25
         : (special == SPECIAL_PRISM ? 0.26
         : (special == SPECIAL_PULSE ? 0.23 : 0.20))));
+    if (special == SPECIAL_CREEPER) flash_time = 0.26;
+    if (special == SPECIAL_CHOCOLATE) flash_time = 0.22;
     flash_kind = special;
 
     Color spark = {0.55, 0.95, 1.0};
@@ -296,6 +342,10 @@ static void start_special_impact(int x, int y, int special, int variant) {
         spark = (Color){1.0, 0.88, 0.16};
     else if (special == SPECIAL_DIAGONAL)
         spark = (Color){0.32, 1.0, 0.55};
+    else if (special == SPECIAL_CREEPER)
+        spark = (Color){0.30, 0.90, 0.18};
+    else if (special == SPECIAL_CHOCOLATE)
+        spark = (Color){0.78, 0.38, 0.16};
     for (int i = 0; i < 30; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
@@ -327,7 +377,8 @@ static void spawn_fragments(int x, int y, int color_index, int special,
         p->y = center_y + (random_unit() - 0.5) * 18.0;
         if (special == SPECIAL_BOMB || special == SPECIAL_ROCKET ||
             special == SPECIAL_METEOR || special == SPECIAL_PRISM ||
-            special == SPECIAL_PULSE || special == SPECIAL_THUNDER) {
+            special == SPECIAL_PULSE || special == SPECIAL_THUNDER ||
+            special == SPECIAL_CREEPER || special == SPECIAL_CHOCOLATE) {
             double force = special == SPECIAL_ROCKET ? 205.0
                 : (special == SPECIAL_METEOR ? 180.0 : 145.0);
             double scatter = special == SPECIAL_ROCKET ? 350.0
@@ -384,7 +435,7 @@ static void spawn_cell_score(int x, int y, int points, Color color) {
 
 static int award_points(int base_points) {
     int multiplier = overdrive_time > 0.0 ? 3 : (focus_time > 0.0 ? 2 : 1);
-    if (minecraft_time > 0.0) multiplier *= 2;
+    if (minecraft_time > 0.0 || chocolate_time > 0.0) multiplier *= 2;
     int awarded = base_points * multiplier;
     score += awarded;
     if (score > high_score) {
@@ -571,8 +622,13 @@ static void spawn_piece(void) {
         advance_next_piece();
         return;
     }
-    if (minecraft_time <= 0.0 && rand() % 100 == 0)
-        start_minecraft_event();
+    if (minecraft_time <= 0.0 && chocolate_time <= 0.0 && !creeper.active) {
+        int event_roll = rand() % 100;
+        if (event_roll == 0)
+            start_minecraft_event();
+        else if (event_roll == 1)
+            start_chocolate_event();
+    }
     if (overdrive_time <= 0.0 && rand() % 150 == 0) {
         overdrive_time = 10.0;
         overdrive_banner_timer = 2.2;
@@ -657,10 +713,16 @@ static void reset_game(void) {
     minecraft_time = 0.0;
     minecraft_banner_timer = 0.0;
     minecraft_flash_time = 0.0;
+    minecraft_creeper_timer = 0.0;
+    chocolate_time = 0.0;
+    chocolate_banner_timer = 0.0;
+    chocolate_flash_time = 0.0;
+    chocolate_melt_timer = 0.0;
     score_popup_cursor = 0;
     particle_cursor = 0;
     wave_cursor = 0;
     rocket.active = false;
+    creeper.active = false;
     bag_pos = PIECES;
     next_piece = draw_from_bag();
     roll_special(&next_special_index, &next_special_type);
@@ -1116,6 +1178,125 @@ static void steer_rocket(int direction) {
     }
 }
 
+static void compact_board_columns(void) {
+    for (int x = 0; x < COLS; ++x) {
+        int write = ROWS - 1;
+        for (int read = ROWS - 1; read >= 0; --read) {
+            if (!board[read][x]) continue;
+            if (write != read) {
+                board[write][x] = board[read][x];
+                board_special[write][x] = board_special[read][x];
+                fall_offset[write][x] = (write - read) * CELL;
+            }
+            --write;
+        }
+        while (write >= 0) {
+            board[write][x] = 0;
+            board_special[write][x] = SPECIAL_NONE;
+            fall_offset[write][x] = 0.0;
+            --write;
+        }
+    }
+}
+
+static void spawn_creeper(void) {
+    creeper.active = true;
+    creeper.column = rand() % COLS;
+    creeper.y = -1.0;
+}
+
+static void spawn_creeper_trail(void) {
+    double center_x = BOARD_X + (creeper.column + 0.5) * CELL;
+    double center_y = BOARD_Y + (ROWS - creeper.y - 0.5) * CELL;
+    for (int i = 0; i < 3; ++i) {
+        Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
+        p->active = true;
+        p->x = center_x + (random_unit() - 0.5) * 16.0;
+        p->y = center_y + 12.0 + random_unit() * 9.0;
+        p->vx = (random_unit() - 0.5) * 70.0;
+        p->vy = 35.0 + random_unit() * 90.0;
+        p->max_life = 0.22 + random_unit() * 0.22;
+        p->life = p->max_life;
+        p->size = 3.0 + random_unit() * 4.5;
+        p->color = i == 0 ? (Color){0.58, 0.96, 0.28}
+                          : (Color){0.16, 0.45, 0.10};
+    }
+}
+
+static void explode_creeper(int center_x, int center_y) {
+    int variant = rand() % 3;
+    bool destroyed_any = false;
+    start_special_impact(center_x, center_y, SPECIAL_CREEPER, variant);
+    for (int y = center_y - 1; y <= center_y + 2; ++y) {
+        for (int x = center_x - 1; x <= center_x + 2; ++x) {
+            if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
+            effect_kind[y][x] = SPECIAL_CREEPER;
+            effect_variant[y][x] = (unsigned char)variant;
+            effect_timer[y][x] = 0.58;
+            if (board[y][x]) {
+                spawn_fragments(x, y, board[y][x], SPECIAL_CREEPER,
+                                center_x, center_y);
+                int points = award_points(10 * level);
+                spawn_cell_score(x, y, points, (Color){0.48, 0.94, 0.24});
+                board[y][x] = 0;
+                board_special[y][x] = SPECIAL_NONE;
+                fall_offset[y][x] = 0.0;
+                destroyed_any = true;
+            }
+        }
+    }
+    creeper.active = false;
+    if (destroyed_any) {
+        perfect_clear_candidate = true;
+        compact_board_columns();
+    }
+}
+
+static void update_creeper(double dt) {
+    spawn_creeper_trail();
+    double previous_y = creeper.y;
+    creeper.y += 8.5 * dt;
+    int first_row = previous_y < 0.0 ? 0 : (int)previous_y;
+    int last_row = (int)creeper.y;
+    if (last_row >= ROWS) last_row = ROWS - 1;
+    for (int y = first_row; y <= last_row; ++y) {
+        if (board[y][creeper.column]) {
+            explode_creeper(creeper.column, y);
+            return;
+        }
+    }
+    if (creeper.y >= ROWS)
+        explode_creeper(creeper.column, ROWS - 1);
+}
+
+static void melt_chocolate_row(void) {
+    int variant = rand() % 3;
+    start_special_impact(COLS / 2, ROWS - 1, SPECIAL_CHOCOLATE, variant);
+    for (int x = 0; x < COLS; ++x) {
+        effect_kind[ROWS - 1][x] = SPECIAL_CHOCOLATE;
+        effect_variant[ROWS - 1][x] = (unsigned char)variant;
+        effect_timer[ROWS - 1][x] = 0.52;
+        if (board[ROWS - 1][x]) {
+            spawn_fragments(x, ROWS - 1, board[ROWS - 1][x],
+                            SPECIAL_CHOCOLATE, COLS / 2, ROWS - 1);
+            int points = award_points(6 * level);
+            spawn_cell_score(x, ROWS - 1, points,
+                             (Color){0.94, 0.60, 0.24});
+        }
+    }
+    for (int y = ROWS - 1; y > 0; --y) {
+        memcpy(board[y], board[y - 1], sizeof(board[y]));
+        memcpy(board_special[y], board_special[y - 1],
+               sizeof(board_special[y]));
+        for (int x = 0; x < COLS; ++x)
+            fall_offset[y][x] = board[y][x] ? CELL : 0.0;
+    }
+    memset(board[0], 0, sizeof(board[0]));
+    memset(board_special[0], 0, sizeof(board_special[0]));
+    memset(fall_offset[0], 0, sizeof(fall_offset[0]));
+    chocolate_flash_time = 0.28;
+}
+
 static void lock_piece(void) {
     bool above_top = false;
     for (int i = 0; i < 4; ++i) {
@@ -1189,16 +1370,6 @@ static double gravity_delay(void) {
 
 static void update_settling(double dt) {
     const double step_time = 0.065;
-    double fall_speed = CELL / step_time;
-    for (int y = 0; y < ROWS; ++y) {
-        for (int x = 0; x < COLS; ++x) {
-            if (fall_offset[y][x] > 0.0) {
-                fall_offset[y][x] -= fall_speed * dt;
-                if (fall_offset[y][x] < 0.0) fall_offset[y][x] = 0.0;
-            }
-        }
-    }
-
     settle_accumulator += dt;
     while (settle_accumulator >= step_time && waiting_for_settle) {
         settle_accumulator -= step_time;
@@ -1246,6 +1417,14 @@ static void update_game(double dt) {
         minecraft_flash_time -= dt;
         if (minecraft_flash_time < 0.0) minecraft_flash_time = 0.0;
     }
+    if (chocolate_banner_timer > 0.0) {
+        chocolate_banner_timer -= dt;
+        if (chocolate_banner_timer < 0.0) chocolate_banner_timer = 0.0;
+    }
+    if (chocolate_flash_time > 0.0) {
+        chocolate_flash_time -= dt;
+        if (chocolate_flash_time < 0.0) chocolate_flash_time = 0.0;
+    }
     if (board_rise_offset < 0.0) {
         board_rise_offset += (CELL / 0.34) * dt;
         if (board_rise_offset > 0.0) board_rise_offset = 0.0;
@@ -1290,6 +1469,10 @@ static void update_game(double dt) {
     }
     for (int y = 0; y < ROWS; ++y) {
         for (int x = 0; x < COLS; ++x) {
+            if (fall_offset[y][x] > 0.0) {
+                fall_offset[y][x] -= (CELL / 0.065) * dt;
+                if (fall_offset[y][x] < 0.0) fall_offset[y][x] = 0.0;
+            }
             if (effect_timer[y][x] > 0.0) {
                 effect_timer[y][x] -= dt;
                 if (effect_timer[y][x] <= 0.0) {
@@ -1309,6 +1492,21 @@ static void update_game(double dt) {
     if (minecraft_time > 0.0) {
         minecraft_time -= dt;
         if (minecraft_time < 0.0) minecraft_time = 0.0;
+        minecraft_creeper_timer -= dt;
+        if (minecraft_creeper_timer <= 0.0 && minecraft_time > 0.0) {
+            if (!creeper.active) spawn_creeper();
+            minecraft_creeper_timer += 5.0;
+        }
+    }
+    if (chocolate_time > 0.0) {
+        chocolate_time -= dt;
+        if (chocolate_time < 0.0) chocolate_time = 0.0;
+        chocolate_melt_timer -= dt;
+        if (chocolate_melt_timer <= 0.0 && chocolate_time > 0.0 &&
+            !normal_clear_active && !waiting_for_settle) {
+            melt_chocolate_row();
+            chocolate_melt_timer += 5.0;
+        }
     }
     if (overdrive_time > 0.0) {
         overdrive_time -= dt;
@@ -1320,6 +1518,8 @@ static void update_game(double dt) {
     }
     elapsed_time += dt;
     level = 1 + lines / 10 + (int)(elapsed_time / 35.0);
+    if (creeper.active && !normal_clear_active && !waiting_for_settle)
+        update_creeper(dt);
     if (normal_clear_active) {
         normal_clear_timer -= dt;
         if (normal_clear_timer <= 0.0) complete_normal_line_clear();
@@ -1635,6 +1835,34 @@ static void draw_minecraft_tile(CGContextRef ctx, double x, double y, int size,
     CGContextStrokeRect(ctx, CGRectMake(x + 2, y + 2, size - 4, size - 4));
 }
 
+static void draw_chocolate_tile(CGContextRef ctx, double x, double y, int size,
+                                double alpha, uint32_t seed) {
+    Color chocolate = {0.40, 0.16, 0.075};
+    Color light = {0.67, 0.31, 0.13};
+    Color dark = {0.20, 0.07, 0.035};
+    Color shine = {1.0, 0.72, 0.36};
+    fill_rect(ctx, x + 2, y + 2, size - 4, size - 4,
+              chocolate, alpha);
+    double half = size / 2.0;
+    fill_rect(ctx, x + half - 1, y + 3, 2, size - 6, dark, 0.85 * alpha);
+    fill_rect(ctx, x + 3, y + half - 1, size - 6, 2, dark, 0.85 * alpha);
+    for (int row = 0; row < 2; ++row) {
+        for (int col = 0; col < 2; ++col) {
+            seed = seed * 1664525u + 1013904223u;
+            double inset = 4.0 + (seed % 2u);
+            fill_rect(ctx, x + col * half + inset,
+                      y + row * half + inset,
+                      half - inset - 2, half - inset - 2,
+                      light, 0.62 * alpha);
+        }
+    }
+    fill_rect(ctx, x + 6, y + size - 8, size - 12, 3,
+              shine, 0.52 * alpha);
+    CGContextSetRGBStrokeColor(ctx, dark.r, dark.g, dark.b, 0.72 * alpha);
+    CGContextSetLineWidth(ctx, 1.5);
+    CGContextStrokeRect(ctx, CGRectMake(x + 2, y + 2, size - 4, size - 4));
+}
+
 static void draw_block_with_offset(CGContextRef ctx, int gx, int gy,
                                    int color_index, double alpha,
                                    double vertical_offset) {
@@ -1714,6 +1942,11 @@ static void draw_piece(CGContextRef ctx, FallingPiece p, double alpha) {
                 double py = BOARD_Y + (ROWS - 1 - y) * CELL;
                 draw_minecraft_tile(ctx, px, py, CELL, alpha, grass_top,
                                     (uint32_t)(p.type * 97 + x * 17 + y * 31));
+            } else if (chocolate_time > 0.0) {
+                double px = BOARD_X + x * CELL;
+                double py = BOARD_Y + (ROWS - 1 - y) * CELL;
+                draw_chocolate_tile(ctx, px, py, CELL, alpha,
+                                    (uint32_t)(p.type * 89 + x * 23 + y * 41));
             } else {
                 draw_block(ctx, x, y, p.type + 1, alpha);
             }
@@ -1751,6 +1984,9 @@ static void draw_preview(CGContextRef ctx, int type, int special_index,
             }
             draw_minecraft_tile(ctx, px, py, size, 1.0, grass_top,
                                 (uint32_t)(type * 101 + b.x * 19 + b.y * 37));
+        } else if (chocolate_time > 0.0) {
+            draw_chocolate_tile(ctx, px, py, size, 1.0,
+                                (uint32_t)(type * 103 + b.x * 29 + b.y * 43));
         } else {
             Color c = piece_colors[type + 1];
             fill_rect(ctx, px + 2, py + 2, size - 4, size - 4, c, 1.0);
@@ -1773,6 +2009,8 @@ static void draw_effects(CGContextRef ctx) {
             else if (effect_kind[y][x] == SPECIAL_CROSS) duration = 0.42;
             else if (effect_kind[y][x] == SPECIAL_PULSE) duration = 0.48;
             else if (effect_kind[y][x] == SPECIAL_THUNDER) duration = 0.42;
+            else if (effect_kind[y][x] == SPECIAL_CREEPER) duration = 0.58;
+            else if (effect_kind[y][x] == SPECIAL_CHOCOLATE) duration = 0.52;
             double alpha = effect_timer[y][x] / duration;
             if (alpha > 1.0) alpha = 1.0;
             int variant = effect_variant[y][x] % 3;
@@ -1884,6 +2122,25 @@ static void draw_effects(CGContextRef ctx) {
                 CGContextSetRGBStrokeColor(ctx, 0.92, 1.0, 1.0, alpha);
                 CGContextSetLineWidth(ctx, variant == 2 ? 6.0 : 4.0);
                 CGContextStrokePath(ctx);
+            } else if (effect_kind[y][x] == SPECIAL_CREEPER) {
+                Color blast = {0.30, 0.88, 0.15};
+                Color core = {0.82, 1.0, 0.42};
+                fill_rect(ctx, px, py, CELL, CELL, blast, 0.62 * alpha);
+                CGContextSetRGBFillColor(ctx, core.r, core.g, core.b,
+                                         0.82 * alpha);
+                CGContextFillEllipseInRect(ctx, CGRectMake(px + 4, py + 4,
+                                                           CELL - 8, CELL - 8));
+                fill_rect(ctx, px + CELL / 2.0 - 3, py, 6, CELL,
+                          (Color){0.08, 0.16, 0.05}, 0.58 * alpha);
+            } else if (effect_kind[y][x] == SPECIAL_CHOCOLATE) {
+                Color melt = {0.52, 0.21, 0.08};
+                Color caramel = {1.0, 0.64, 0.22};
+                fill_rect(ctx, px + 2, py + 2, CELL - 4, CELL - 4,
+                          melt, 0.68 * alpha);
+                fill_rect(ctx, px + 5, py + 2, 5,
+                          8 + variant * 4, caramel, 0.72 * alpha);
+                fill_rect(ctx, px + 18, py + 2, 4,
+                          14 - variant * 2, caramel, 0.58 * alpha);
             } else if (effect_kind[y][x] == SPECIAL_ROCKET ||
                        effect_kind[y][x] == SPECIAL_METEOR) {
                 bool meteor = effect_kind[y][x] == SPECIAL_METEOR;
@@ -1944,6 +2201,27 @@ static void draw_rocket(CGContextRef ctx) {
     CGContextClosePath(ctx);
     CGContextSetRGBFillColor(ctx, flame.r, flame.g, flame.b, 0.95);
     CGContextFillPath(ctx);
+}
+
+static void draw_creeper(CGContextRef ctx) {
+    if (!creeper.active) return;
+    double x = BOARD_X + (creeper.column + 0.5) * CELL;
+    double y = BOARD_Y + (ROWS - creeper.y - 0.5) * CELL;
+    Color green = {0.34, 0.78, 0.18};
+    Color light = {0.55, 0.94, 0.28};
+    Color dark = {0.055, 0.12, 0.045};
+    fill_rect(ctx, x - 18, y - 18, 36, 36, green, 0.22);
+    fill_rect(ctx, x - 14, y - 14, 28, 28, green, 1.0);
+    fill_rect(ctx, x - 11, y + 7, 7, 7, dark, 1.0);
+    fill_rect(ctx, x + 4, y + 7, 7, 7, dark, 1.0);
+    fill_rect(ctx, x - 4, y - 2, 8, 8, dark, 1.0);
+    fill_rect(ctx, x - 9, y - 10, 6, 8, dark, 1.0);
+    fill_rect(ctx, x + 3, y - 10, 6, 8, dark, 1.0);
+    fill_rect(ctx, x - 10, y + 12, 7, 3, light, 0.72);
+    fill_rect(ctx, x + 3, y + 1, 5, 4, light, 0.48);
+    CGContextSetRGBStrokeColor(ctx, 0.12, 0.28, 0.08, 1.0);
+    CGContextSetLineWidth(ctx, 2.0);
+    CGContextStrokeRect(ctx, CGRectMake(x - 14, y - 14, 28, 28));
 }
 
 static void draw_particles(CGContextRef ctx) {
@@ -2077,6 +2355,14 @@ static void draw_shockwaves(CGContextRef ctx) {
             radius = 9.0 + progress * 68.0;
             color = (Color){0.62, 0.90, 1.0};
             line_width = 4.0;
+        } else if (wave->type == SPECIAL_CREEPER) {
+            radius = 14.0 + progress * 98.0;
+            color = (Color){0.34, 0.92, 0.18};
+            line_width = 6.0;
+        } else if (wave->type == SPECIAL_CHOCOLATE) {
+            radius = 10.0 + progress * 74.0;
+            color = (Color){0.88, 0.40, 0.14};
+            line_width = 5.0;
         }
         double alpha = (1.0 - progress) * 0.9;
         CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b, alpha);
@@ -2098,7 +2384,7 @@ static void draw_shockwaves(CGContextRef ctx) {
         CGContextStrokeEllipseInRect(ctx, CGRectMake(wave->x - far_echo,
             wave->y - far_echo, far_echo * 2.0, far_echo * 2.0));
         if (wave->type == SPECIAL_BOMB || wave->type == SPECIAL_ROCKET ||
-            wave->type == SPECIAL_METEOR) {
+            wave->type == SPECIAL_METEOR || wave->type == SPECIAL_CREEPER) {
             double ray = radius * 1.10;
             CGContextBeginPath(ctx);
             CGContextMoveToPoint(ctx, wave->x - ray, wave->y - ray);
@@ -2322,6 +2608,19 @@ static void render_game(CGContextRef ctx) {
                                              COLS * CELL + 42,
                                              ROWS * CELL + 42));
     }
+    if (chocolate_time > 0.0) {
+        double cocoa_alpha = ((uint32_t)(visual_time * 8.0) % 2u) ? 0.96 : 0.68;
+        CGContextSetRGBStrokeColor(ctx, 0.72, 0.30, 0.10, cocoa_alpha);
+        CGContextSetLineWidth(ctx, 5.0);
+        CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 17, BOARD_Y - 17,
+                                             COLS * CELL + 34,
+                                             ROWS * CELL + 34));
+        CGContextSetRGBStrokeColor(ctx, 1.0, 0.64, 0.22, 0.72);
+        CGContextSetLineWidth(ctx, 2.0);
+        CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 21, BOARD_Y - 21,
+                                             COLS * CELL + 42,
+                                             ROWS * CELL + 42));
+    }
     fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL, panel, 1.0);
 
     Color grid = {0.12, 0.15, 0.21};
@@ -2350,6 +2649,13 @@ static void render_game(CGContextRef ctx) {
                     draw_minecraft_tile(ctx, px, py, CELL, 1.0, grass_top,
                                         (uint32_t)(x * 43 + y * 71 +
                                                    board[y][x] * 113));
+                } else if (chocolate_time > 0.0) {
+                    double px = BOARD_X + x * CELL;
+                    double py = BOARD_Y + (ROWS - 1 - y) * CELL +
+                                fall_offset[y][x];
+                    draw_chocolate_tile(ctx, px, py, CELL, 1.0,
+                                        (uint32_t)(x * 47 + y * 73 +
+                                                   board[y][x] * 127));
                 } else
                     draw_block_with_offset(ctx, x, y, board[y][x], 1.0,
                                            fall_offset[y][x]);
@@ -2373,6 +2679,7 @@ static void render_game(CGContextRef ctx) {
         draw_piece(ctx, current, 1.0);
     }
     draw_rocket(ctx);
+    draw_creeper(ctx);
     draw_effects(ctx);
     draw_shockwaves(ctx);
     draw_particles(ctx);
@@ -2393,7 +2700,11 @@ static void render_game(CGContextRef ctx) {
         if (flash_kind == SPECIAL_DRILL) flash = (Color){1.0, 0.62, 0.14};
         if (flash_kind == SPECIAL_PULSE) flash = (Color){1.0, 0.86, 0.18};
         if (flash_kind == SPECIAL_THUNDER) flash = (Color){0.60, 0.90, 1.0};
+        if (flash_kind == SPECIAL_CREEPER) flash = (Color){0.42, 0.94, 0.18};
+        if (flash_kind == SPECIAL_CHOCOLATE) flash = (Color){0.82, 0.34, 0.12};
         if (flash_kind == SPECIAL_PULSE) maximum = 0.17;
+        if (flash_kind == SPECIAL_CREEPER) maximum = 0.26;
+        if (flash_kind == SPECIAL_CHOCOLATE) maximum = 0.22;
         double alpha = flash_time / maximum;
         if (alpha > 1.0) alpha = 1.0;
         fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
@@ -2408,6 +2719,12 @@ static void render_game(CGContextRef ctx) {
         double alpha = minecraft_flash_time / 0.45;
         fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
                   (Color){0.30, 0.78, 0.16}, alpha * 0.44);
+    }
+    if (chocolate_flash_time > 0.0) {
+        double alpha = chocolate_flash_time / 0.45;
+        if (alpha > 1.0) alpha = 1.0;
+        fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
+                  (Color){0.76, 0.30, 0.09}, alpha * 0.40);
     }
     draw_score_popups(ctx);
     CGContextRestoreGState(ctx);
@@ -2464,6 +2781,18 @@ static void render_game(CGContextRef ctx) {
                       BOARD_Y + ROWS * CELL - 162, 2,
                       (Color){0.52, 0.92, 0.28});
     }
+    if (chocolate_banner_timer > 0.0)
+        draw_centered(ctx, "CHOCOLATE", BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL / 2.0 + 76, 4,
+                      (Color){1.0, 0.58, 0.20});
+    if (chocolate_time > 0.0) {
+        char chocolate_text[28];
+        snprintf(chocolate_text, sizeof(chocolate_text), "CHOCOLATE X2 %d",
+                 (int)chocolate_time + 1);
+        draw_centered(ctx, chocolate_text, BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL - 162, 2,
+                      (Color){1.0, 0.62, 0.24});
+    }
     if (shield_banner_timer > 0.0)
         draw_centered(ctx, rescue_shield ? "SHIELD READY" : "SHIELD SAVE",
                       BOARD_X + COLS * CELL / 2.0,
@@ -2481,8 +2810,9 @@ static void render_game(CGContextRef ctx) {
     fill_rect(ctx, side_x, 503, 220, 47, panel, 0.72);
     draw_text(ctx, number, score_x + 2, 511, score_scale, score_shadow);
     Color live_score = minecraft_time > 0.0 ? (Color){0.50, 0.90, 0.26}
+        : (chocolate_time > 0.0 ? (Color){1.0, 0.58, 0.20}
         : (overdrive_time > 0.0 ? (Color){0.55, 0.94, 1.0}
-        : (focus_time > 0.0 ? (Color){1.0, 0.84, 0.24} : white));
+        : (focus_time > 0.0 ? (Color){1.0, 0.84, 0.24} : white)));
     draw_text(ctx, number, score_x, 513, score_scale, live_score);
     draw_text(ctx, "LINES", side_x, 474, 2, muted);
     snprintf(number, sizeof(number), "%d", lines);
@@ -2502,10 +2832,14 @@ static void render_game(CGContextRef ctx) {
     draw_preview(ctx, next_piece, next_special_index, next_special_type,
                  side_x, 285, 220, 90, 22);
 
-    draw_text(ctx, minecraft_time > 0.0 ? "MINECRAFT X2" : "8 SPECIALS",
+    const char *theme_status = minecraft_time > 0.0 ? "MINECRAFT X2"
+        : (chocolate_time > 0.0 ? "CHOCOLATE X2" : "8 SPECIALS");
+    Color theme_color = minecraft_time > 0.0 ? (Color){0.50, 0.90, 0.26}
+        : (chocolate_time > 0.0 ? (Color){1.0, 0.58, 0.20}
+                               : piece_colors[5]);
+    draw_text(ctx, theme_status,
               side_x, 252, 2,
-              minecraft_time > 0.0 ? (Color){0.50, 0.90, 0.26}
-                                   : piece_colors[5]);
+              theme_color);
     draw_text(ctx, rescue_shield ? "SHIELD READY" : "FLOW BONUS",
               rescue_shield ? 515 : 525, 252, 2,
               rescue_shield ? (Color){0.38, 1.0, 0.74} : piece_colors[1]);
