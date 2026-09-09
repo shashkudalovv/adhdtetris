@@ -14,7 +14,7 @@
 
 enum {
     COLS = 10, ROWS = 20, PIECES = 7,
-    MAX_PARTICLES = 1024, MAX_WAVES = 48, MAX_SCORE_POPUPS = 128
+    MAX_PARTICLES = 1400, MAX_WAVES = 64, MAX_SCORE_POPUPS = 160
 };
 enum {
     SPECIAL_NONE, SPECIAL_BOMB, SPECIAL_LASER, SPECIAL_ROCKET,
@@ -108,6 +108,9 @@ static double flow_display_timer;
 static bool rescue_shield;
 static int next_shield_lines;
 static double shield_banner_timer;
+static double minecraft_time;
+static double minecraft_banner_timer;
+static double minecraft_flash_time;
 static ScorePopup score_popups[MAX_SCORE_POPUPS];
 static int score_popup_cursor;
 static Particle particles[MAX_PARTICLES];
@@ -193,6 +196,28 @@ static void save_high_score(void) {
         unlink(temporary_path);
 }
 
+static void start_minecraft_event(void) {
+    minecraft_time = 20.0;
+    minecraft_banner_timer = 2.6;
+    minecraft_flash_time = 0.45;
+    shake_time = 0.42;
+    if (shake_strength < 9.0) shake_strength = 9.0;
+    for (int i = 0; i < 84; ++i) {
+        Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
+        p->active = true;
+        p->x = BOARD_X + random_unit() * COLS * CELL;
+        p->y = BOARD_Y + ROWS * CELL * 0.45 +
+               (random_unit() - 0.5) * 90.0;
+        p->vx = (random_unit() - 0.5) * 260.0;
+        p->vy = 100.0 + random_unit() * 280.0;
+        p->max_life = 0.55 + random_unit() * 0.55;
+        p->life = p->max_life;
+        p->size = 4.0 + random_unit() * 7.0;
+        p->color = i % 3 == 0 ? (Color){0.24, 0.68, 0.16}
+                              : (Color){0.46, 0.27, 0.12};
+    }
+}
+
 static void start_special_impact(int x, int y, int special, int variant) {
     Shockwave *wave = &shockwaves[wave_cursor++ % MAX_WAVES];
     wave->active = true;
@@ -208,15 +233,15 @@ static void start_special_impact(int x, int y, int special, int variant) {
     wave->type = special;
     wave->variant = variant;
 
-    double power = special == SPECIAL_ROCKET ? 16.0
-        : (special == SPECIAL_METEOR ? 13.0
-        : (special == SPECIAL_BOMB ? 14.0
-        : (special == SPECIAL_PRISM ? 10.5
-        : (special == SPECIAL_PULSE ? 11.5
-        : (special == SPECIAL_THUNDER ? 10.0 : 9.0)))));
+    double power = special == SPECIAL_ROCKET ? 20.0
+        : (special == SPECIAL_METEOR ? 16.0
+        : (special == SPECIAL_BOMB ? 18.0
+        : (special == SPECIAL_PRISM ? 13.0
+        : (special == SPECIAL_PULSE ? 14.5
+        : (special == SPECIAL_THUNDER ? 12.5 : 11.0)))));
     if (shake_strength < power) shake_strength = power;
     else shake_strength += 2.2;
-    if (shake_strength > 18.0) shake_strength = 18.0;
+    if (shake_strength > 22.0) shake_strength = 22.0;
     shake_time = special == SPECIAL_ROCKET ? 0.58
         : (special == SPECIAL_METEOR ? 0.48
         : (special == SPECIAL_BOMB ? 0.52
@@ -237,14 +262,14 @@ static void start_special_impact(int x, int y, int special, int variant) {
         spark = (Color){1.0, 0.88, 0.16};
     else if (special == SPECIAL_DIAGONAL)
         spark = (Color){0.32, 1.0, 0.55};
-    for (int i = 0; i < 22; ++i) {
+    for (int i = 0; i < 30; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
         p->x = wave->x + (random_unit() - 0.5) * 10.0;
         p->y = wave->y + (random_unit() - 0.5) * 10.0;
         double direction_x = random_unit() - 0.5;
         double direction_y = random_unit() - 0.5;
-        double burst = 230.0 + random_unit() * 260.0;
+        double burst = 280.0 + random_unit() * 340.0;
         p->vx = direction_x * burst;
         p->vy = direction_y * burst + 90.0;
         p->max_life = 0.30 + random_unit() * 0.34;
@@ -259,8 +284,8 @@ static void spawn_fragments(int x, int y, int color_index, int special,
     if (color_index <= 0 || color_index > PIECES) return;
     double center_x = BOARD_X + (x + 0.5) * CELL;
     double center_y = BOARD_Y + (ROWS - y - 0.5) * CELL;
-    int fragment_count = special == SPECIAL_ROCKET ? 16
-        : (special == SPECIAL_METEOR ? 14 : 10);
+    int fragment_count = special == SPECIAL_ROCKET ? 22
+        : (special == SPECIAL_METEOR ? 18 : 14);
     for (int i = 0; i < fragment_count; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
@@ -325,6 +350,7 @@ static void spawn_cell_score(int x, int y, int points, Color color) {
 
 static int award_points(int base_points) {
     int multiplier = overdrive_time > 0.0 ? 3 : (focus_time > 0.0 ? 2 : 1);
+    if (minecraft_time > 0.0) multiplier *= 2;
     int awarded = base_points * multiplier;
     score += awarded;
     if (score > high_score) {
@@ -511,6 +537,8 @@ static void spawn_piece(void) {
         advance_next_piece();
         return;
     }
+    if (minecraft_time <= 0.0 && rand() % 100 == 0)
+        start_minecraft_event();
     if (overdrive_time <= 0.0 && rand() % 150 == 0) {
         overdrive_time = 10.0;
         overdrive_banner_timer = 2.2;
@@ -592,6 +620,9 @@ static void reset_game(void) {
     rescue_shield = false;
     next_shield_lines = 10;
     shield_banner_timer = 0.0;
+    minecraft_time = 0.0;
+    minecraft_banner_timer = 0.0;
+    minecraft_flash_time = 0.0;
     score_popup_cursor = 0;
     particle_cursor = 0;
     wave_cursor = 0;
@@ -1173,6 +1204,14 @@ static void update_game(double dt) {
         shield_banner_timer -= dt;
         if (shield_banner_timer < 0.0) shield_banner_timer = 0.0;
     }
+    if (minecraft_banner_timer > 0.0) {
+        minecraft_banner_timer -= dt;
+        if (minecraft_banner_timer < 0.0) minecraft_banner_timer = 0.0;
+    }
+    if (minecraft_flash_time > 0.0) {
+        minecraft_flash_time -= dt;
+        if (minecraft_flash_time < 0.0) minecraft_flash_time = 0.0;
+    }
     if (board_rise_offset < 0.0) {
         board_rise_offset += (CELL / 0.34) * dt;
         if (board_rise_offset > 0.0) board_rise_offset = 0.0;
@@ -1232,6 +1271,10 @@ static void update_game(double dt) {
         return;
     }
     if (paused) return;
+    if (minecraft_time > 0.0) {
+        minecraft_time -= dt;
+        if (minecraft_time < 0.0) minecraft_time = 0.0;
+    }
     if (overdrive_time > 0.0) {
         overdrive_time -= dt;
         if (overdrive_time < 0.0) overdrive_time = 0.0;
@@ -1478,6 +1521,42 @@ static void draw_special_marker(CGContextRef ctx, double x, double y, int size,
     }
 }
 
+static void draw_minecraft_tile(CGContextRef ctx, double x, double y, int size,
+                                double alpha, bool grass_top, uint32_t seed) {
+    Color dirt = {0.45, 0.27, 0.13};
+    Color dark_dirt = {0.29, 0.16, 0.08};
+    Color light_dirt = {0.62, 0.39, 0.19};
+    Color grass = {0.28, 0.68, 0.16};
+    Color light_grass = {0.43, 0.82, 0.22};
+    fill_rect(ctx, x + 2, y + 2, size - 4, size - 4, dirt, alpha);
+
+    double pixel = size >= 28 ? 4.0 : 3.0;
+    for (int i = 0; i < 7; ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        double px = x + 3 + (seed % (uint32_t)(size - 8));
+        seed = seed * 1664525u + 1013904223u;
+        double py = y + 3 + (seed % (uint32_t)(size - 8));
+        Color patch = i % 3 == 0 ? light_dirt : dark_dirt;
+        fill_rect(ctx, px, py, pixel, pixel, patch, 0.62 * alpha);
+    }
+    if (grass_top) {
+        fill_rect(ctx, x + 2, y + size - 10, size - 4, 8,
+                  grass, alpha);
+        fill_rect(ctx, x + 3, y + size - 6, size - 6, 4,
+                  light_grass, alpha);
+        for (int i = 0; i < 4; ++i) {
+            seed = seed * 22695477u + 1u;
+            double px = x + 3 + (seed % (uint32_t)(size - 7));
+            double depth = 2.0 + (seed % 5u);
+            fill_rect(ctx, px, y + size - 10 - depth, pixel, depth,
+                      grass, alpha);
+        }
+    }
+    CGContextSetRGBStrokeColor(ctx, 0.12, 0.10, 0.06, 0.42 * alpha);
+    CGContextSetLineWidth(ctx, 1.0);
+    CGContextStrokeRect(ctx, CGRectMake(x + 2, y + 2, size - 4, size - 4));
+}
+
 static void draw_block_with_offset(CGContextRef ctx, int gx, int gy,
                                    int color_index, double alpha,
                                    double vertical_offset) {
@@ -1546,7 +1625,20 @@ static void draw_piece(CGContextRef ctx, FallingPiece p, double alpha) {
         int x = p.x + shapes[p.type][p.rotation][i].x;
         int y = p.y + shapes[p.type][p.rotation][i].y;
         if (y >= 0) {
-            draw_block(ctx, x, y, p.type + 1, alpha);
+            if (minecraft_time > 0.0) {
+                bool grass_top = true;
+                for (int j = 0; j < 4; ++j) {
+                    int other_x = p.x + shapes[p.type][p.rotation][j].x;
+                    int other_y = p.y + shapes[p.type][p.rotation][j].y;
+                    if (other_x == x && other_y == y - 1) grass_top = false;
+                }
+                double px = BOARD_X + x * CELL;
+                double py = BOARD_Y + (ROWS - 1 - y) * CELL;
+                draw_minecraft_tile(ctx, px, py, CELL, alpha, grass_top,
+                                    (uint32_t)(p.type * 97 + x * 17 + y * 31));
+            } else {
+                draw_block(ctx, x, y, p.type + 1, alpha);
+            }
             if (i == p.special_index) {
                 double px = BOARD_X + x * CELL;
                 double py = BOARD_Y + (ROWS - 1 - y) * CELL;
@@ -1571,13 +1663,22 @@ static void draw_preview(CGContextRef ctx, int type, int special_index,
     double oy = y + (box_height - height) / 2.0 - min_y * size;
     for (int i = 0; i < 4; ++i) {
         Block b = shapes[type][0][i];
-        Color c = piece_colors[type + 1];
-        fill_rect(ctx, ox + b.x * size + 2, oy + (max_y - b.y) * size + 2,
-                  size - 4, size - 4, c, 1.0);
+        double px = ox + b.x * size;
+        double py = oy + (max_y - b.y) * size;
+        if (minecraft_time > 0.0) {
+            bool grass_top = true;
+            for (int j = 0; j < 4; ++j) {
+                Block other = shapes[type][0][j];
+                if (other.x == b.x && other.y == b.y - 1) grass_top = false;
+            }
+            draw_minecraft_tile(ctx, px, py, size, 1.0, grass_top,
+                                (uint32_t)(type * 101 + b.x * 19 + b.y * 37));
+        } else {
+            Color c = piece_colors[type + 1];
+            fill_rect(ctx, px + 2, py + 2, size - 4, size - 4, c, 1.0);
+        }
         if (i == special_index)
-            draw_special_marker(ctx, ox + b.x * size,
-                                oy + (max_y - b.y) * size,
-                                size, special_type, 1.0);
+            draw_special_marker(ctx, px, py, size, special_type, 1.0);
     }
 }
 
@@ -1913,6 +2014,24 @@ static void draw_shockwaves(CGContextRef ctx) {
         CGContextSetLineWidth(ctx, 2.0);
         CGContextStrokeEllipseInRect(ctx, CGRectMake(wave->x - echo,
             wave->y - echo, echo * 2.0, echo * 2.0));
+        double far_echo = radius * 1.48;
+        CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, alpha * 0.16);
+        CGContextSetLineWidth(ctx, 1.5);
+        CGContextStrokeEllipseInRect(ctx, CGRectMake(wave->x - far_echo,
+            wave->y - far_echo, far_echo * 2.0, far_echo * 2.0));
+        if (wave->type == SPECIAL_BOMB || wave->type == SPECIAL_ROCKET ||
+            wave->type == SPECIAL_METEOR) {
+            double ray = radius * 1.10;
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, wave->x - ray, wave->y - ray);
+            CGContextAddLineToPoint(ctx, wave->x + ray, wave->y + ray);
+            CGContextMoveToPoint(ctx, wave->x - ray, wave->y + ray);
+            CGContextAddLineToPoint(ctx, wave->x + ray, wave->y - ray);
+            CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b,
+                                       alpha * 0.46);
+            CGContextSetLineWidth(ctx, 3.0);
+            CGContextStrokePath(ctx);
+        }
         if (wave->variant == 2) {
             CGContextSetLineWidth(ctx, 3.0);
             CGContextMoveToPoint(ctx, wave->x - radius, wave->y);
@@ -1984,6 +2103,19 @@ static void render_game(CGContextRef ctx) {
                                              COLS * CELL + 28,
                                              ROWS * CELL + 28));
     }
+    if (minecraft_time > 0.0) {
+        double grass_alpha = ((uint32_t)(visual_time * 8.0) % 2u) ? 0.95 : 0.68;
+        CGContextSetRGBStrokeColor(ctx, 0.30, 0.76, 0.16, grass_alpha);
+        CGContextSetLineWidth(ctx, 5.0);
+        CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 17, BOARD_Y - 17,
+                                             COLS * CELL + 34,
+                                             ROWS * CELL + 34));
+        CGContextSetRGBStrokeColor(ctx, 0.48, 0.28, 0.12, 0.88);
+        CGContextSetLineWidth(ctx, 3.0);
+        CGContextStrokeRect(ctx, CGRectMake(BOARD_X - 21, BOARD_Y - 21,
+                                             COLS * CELL + 42,
+                                             ROWS * CELL + 42));
+    }
     fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL, panel, 1.0);
 
     Color grid = {0.12, 0.15, 0.21};
@@ -2004,7 +2136,15 @@ static void render_game(CGContextRef ctx) {
             if (board[y][x]) {
                 if (normal_clear_active && pending_clear_rows[y])
                     draw_clearing_block(ctx, x, y, board[y][x]);
-                else
+                else if (minecraft_time > 0.0) {
+                    double px = BOARD_X + x * CELL;
+                    double py = BOARD_Y + (ROWS - 1 - y) * CELL +
+                                fall_offset[y][x];
+                    bool grass_top = y == 0 || board[y - 1][x] == 0;
+                    draw_minecraft_tile(ctx, px, py, CELL, 1.0, grass_top,
+                                        (uint32_t)(x * 43 + y * 71 +
+                                                   board[y][x] * 113));
+                } else
                     draw_block_with_offset(ctx, x, y, board[y][x], 1.0,
                                            fall_offset[y][x]);
                 if (board_special[y][x] != SPECIAL_NONE) {
@@ -2051,12 +2191,17 @@ static void render_game(CGContextRef ctx) {
         double alpha = flash_time / maximum;
         if (alpha > 1.0) alpha = 1.0;
         fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
-                  flash, alpha * 0.42);
+                  flash, alpha * 0.50);
     }
     if (danger_flash_time > 0.0) {
         double alpha = danger_flash_time / 0.22;
         fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
                   (Color){1.0, 0.12, 0.08}, alpha * 0.30);
+    }
+    if (minecraft_flash_time > 0.0) {
+        double alpha = minecraft_flash_time / 0.45;
+        fill_rect(ctx, BOARD_X, BOARD_Y, COLS * CELL, ROWS * CELL,
+                  (Color){0.30, 0.78, 0.16}, alpha * 0.44);
     }
     draw_score_popups(ctx);
     CGContextRestoreGState(ctx);
@@ -2101,6 +2246,18 @@ static void render_game(CGContextRef ctx) {
                       BOARD_Y + ROWS * CELL - 102, 2,
                       (Color){0.55, 0.92, 1.0});
     }
+    if (minecraft_banner_timer > 0.0)
+        draw_centered(ctx, "MINECRAFT", BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL / 2.0 + 76, 4,
+                      (Color){0.48, 0.88, 0.24});
+    if (minecraft_time > 0.0) {
+        char minecraft_text[28];
+        snprintf(minecraft_text, sizeof(minecraft_text), "MINECRAFT X2 %d",
+                 (int)minecraft_time + 1);
+        draw_centered(ctx, minecraft_text, BOARD_X + COLS * CELL / 2.0,
+                      BOARD_Y + ROWS * CELL - 162, 2,
+                      (Color){0.52, 0.92, 0.28});
+    }
     if (shield_banner_timer > 0.0)
         draw_centered(ctx, rescue_shield ? "SHIELD READY" : "SHIELD SAVE",
                       BOARD_X + COLS * CELL / 2.0,
@@ -2117,8 +2274,9 @@ static void render_game(CGContextRef ctx) {
     Color score_shadow = {0.01, 0.02, 0.04};
     fill_rect(ctx, side_x, 503, 220, 47, panel, 0.72);
     draw_text(ctx, number, score_x + 2, 511, score_scale, score_shadow);
-    Color live_score = overdrive_time > 0.0 ? (Color){0.55, 0.94, 1.0}
-        : (focus_time > 0.0 ? (Color){1.0, 0.84, 0.24} : white);
+    Color live_score = minecraft_time > 0.0 ? (Color){0.50, 0.90, 0.26}
+        : (overdrive_time > 0.0 ? (Color){0.55, 0.94, 1.0}
+        : (focus_time > 0.0 ? (Color){1.0, 0.84, 0.24} : white));
     draw_text(ctx, number, score_x, 513, score_scale, live_score);
     draw_text(ctx, "LINES", side_x, 474, 2, muted);
     snprintf(number, sizeof(number), "%d", lines);
@@ -2138,7 +2296,10 @@ static void render_game(CGContextRef ctx) {
     draw_preview(ctx, next_piece, next_special_index, next_special_type,
                  side_x, 285, 220, 90, 22);
 
-    draw_text(ctx, "8 SPECIALS", side_x, 252, 2, piece_colors[5]);
+    draw_text(ctx, minecraft_time > 0.0 ? "MINECRAFT X2" : "8 SPECIALS",
+              side_x, 252, 2,
+              minecraft_time > 0.0 ? (Color){0.50, 0.90, 0.26}
+                                   : piece_colors[5]);
     draw_text(ctx, rescue_shield ? "SHIELD READY" : "FLOW BONUS",
               rescue_shield ? 515 : 525, 252, 2,
               rescue_shield ? (Color){0.38, 1.0, 0.74} : piece_colors[1]);
