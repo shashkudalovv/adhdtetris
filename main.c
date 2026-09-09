@@ -21,6 +21,7 @@ enum {
     SPECIAL_CROSS, SPECIAL_PRISM, SPECIAL_METEOR,
     SPECIAL_DIAGONAL, SPECIAL_DRILL, SPECIAL_PULSE, SPECIAL_THUNDER
 };
+enum { SCREEN_MAIN_MENU, SCREEN_SHOP, SCREEN_SETTINGS, SCREEN_GAME };
 
 static const int WINDOW_W = 670;
 static const int WINDOW_H = 720;
@@ -73,6 +74,8 @@ static int lines;
 static int level;
 static int high_score;
 static bool high_score_dirty;
+static int screen_mode = SCREEN_MAIN_MENU;
+static bool sound_muted;
 static bool paused;
 static bool game_over;
 static bool running = true;
@@ -193,6 +196,37 @@ static void save_high_score(void) {
     if (written && rename(temporary_path, path) == 0)
         high_score_dirty = false;
     else
+        unlink(temporary_path);
+}
+
+static bool get_settings_path(char *path, size_t capacity, bool temporary) {
+    const char *user_home = getenv("HOME");
+    if (!user_home || !user_home[0]) return false;
+    int length = snprintf(path, capacity, "%s/.adhdtetris_settings%s",
+                          user_home, temporary ? ".tmp" : "");
+    return length > 0 && (size_t)length < capacity;
+}
+
+static void load_settings(void) {
+    char path[1024];
+    if (!get_settings_path(path, sizeof(path), false)) return;
+    FILE *file = fopen(path, "r");
+    if (!file) return;
+    int muted = 0;
+    if (fscanf(file, "%d", &muted) == 1) sound_muted = muted != 0;
+    fclose(file);
+}
+
+static void save_settings(void) {
+    char path[1024], temporary_path[1024];
+    if (!get_settings_path(path, sizeof(path), false) ||
+        !get_settings_path(temporary_path, sizeof(temporary_path), true))
+        return;
+    FILE *file = fopen(temporary_path, "w");
+    if (!file) return;
+    bool written = fprintf(file, "%d\n", sound_muted ? 1 : 0) > 0;
+    if (fclose(file) != 0) written = false;
+    if (!written || rename(temporary_path, path) != 0)
         unlink(temporary_path);
 }
 
@@ -1266,6 +1300,7 @@ static void update_game(double dt) {
             }
         }
     }
+    if (screen_mode != SCREEN_GAME) return;
     if (game_over) {
         save_high_score();
         return;
@@ -1307,7 +1342,21 @@ static void update_game(double dt) {
 }
 
 static void handle_key(unsigned short key) {
-    if (key == 53 || key == 12) { running = false; return; } /* Esc, Q */
+    if (key == 12) { running = false; return; }              /* Q */
+    if (screen_mode != SCREEN_GAME) {
+        if (key == 53) screen_mode = SCREEN_MAIN_MENU;       /* Esc */
+        else if (key == 36 && screen_mode == SCREEN_MAIN_MENU) { /* Enter */
+            reset_game();
+            screen_mode = SCREEN_GAME;
+        }
+        return;
+    }
+    if (key == 53) {                                         /* Esc */
+        save_high_score();
+        paused = false;
+        screen_mode = SCREEN_MAIN_MENU;
+        return;
+    }
     if (key == 15) { reset_game(); return; }                 /* R */
     if (key == 35 && !game_over) { paused = !paused; return; } /* P */
     if (paused || game_over) return;
@@ -1350,6 +1399,35 @@ static void handle_key(unsigned short key) {
         default: break;
     }
     if (score > high_score) high_score = score;
+}
+
+static bool point_in_button(CGPoint point, double x, double y,
+                            double width, double height) {
+    return point.x >= x && point.x <= x + width &&
+           point.y >= y && point.y <= y + height;
+}
+
+static void handle_click(CGPoint point) {
+    if (screen_mode == SCREEN_MAIN_MENU) {
+        if (point_in_button(point, 185, 380, 300, 72)) {
+            reset_game();
+            screen_mode = SCREEN_GAME;
+        } else if (point_in_button(point, 185, 280, 300, 72)) {
+            screen_mode = SCREEN_SHOP;
+        } else if (point_in_button(point, 185, 180, 300, 72)) {
+            screen_mode = SCREEN_SETTINGS;
+        }
+    } else if (screen_mode == SCREEN_SETTINGS) {
+        if (point_in_button(point, 185, 300, 300, 78)) {
+            sound_muted = !sound_muted;
+            save_settings();
+        } else if (point_in_button(point, 55, 50, 160, 55)) {
+            screen_mode = SCREEN_MAIN_MENU;
+        }
+    } else if (screen_mode == SCREEN_SHOP) {
+        if (point_in_button(point, 55, 50, 160, 55))
+            screen_mode = SCREEN_MAIN_MENU;
+    }
 }
 
 static void set_fill(CGContextRef ctx, Color c, double alpha) {
@@ -2052,6 +2130,134 @@ static void draw_shockwaves(CGContextRef ctx) {
     }
 }
 
+static void draw_menu_background(CGContextRef ctx) {
+    Color background = {0.025, 0.035, 0.065};
+    Color grid = {0.10, 0.15, 0.23};
+    fill_rect(ctx, 0, 0, WINDOW_W, WINDOW_H, background, 1.0);
+    CGContextSetRGBStrokeColor(ctx, grid.r, grid.g, grid.b, 0.42);
+    CGContextSetLineWidth(ctx, 1.0);
+    for (int x = 0; x <= WINDOW_W; x += 30) {
+        CGContextMoveToPoint(ctx, x, 0);
+        CGContextAddLineToPoint(ctx, x, WINDOW_H);
+    }
+    for (int y = 0; y <= WINDOW_H; y += 30) {
+        CGContextMoveToPoint(ctx, 0, y);
+        CGContextAddLineToPoint(ctx, WINDOW_W, y);
+    }
+    CGContextStrokePath(ctx);
+
+    uint32_t tick = (uint32_t)(visual_time * 24.0);
+    for (int i = 0; i < 22; ++i) {
+        uint32_t hash = (uint32_t)(i + 1) * 2654435761u;
+        double x = (double)(hash % (WINDOW_W + 80)) - 40.0;
+        double y = (double)(((hash / 131u) + tick * (1u + i % 3u)) %
+                            (WINDOW_H + 80)) - 40.0;
+        int color_index = 1 + i % PIECES;
+        double pulse = (((hash >> 8) + tick / 12u) & 1u) ? 0.12 : 0.07;
+        fill_rect(ctx, x, y, 22, 22, piece_colors[color_index], pulse);
+        fill_rect(ctx, x + 4, y + 15, 14, 2,
+                  (Color){1.0, 1.0, 1.0}, pulse * 0.8);
+    }
+}
+
+static void draw_menu_button(CGContextRef ctx, double x, double y,
+                             double width, double height, const char *label,
+                             Color accent) {
+    Color panel = {0.055, 0.075, 0.12};
+    Color shadow = {0.01, 0.02, 0.04};
+    fill_rect(ctx, x - 5, y - 5, width + 10, height + 10,
+              accent, 0.18);
+    fill_rect(ctx, x + 6, y - 7, width, height, shadow, 0.70);
+    fill_rect(ctx, x, y, width, height, panel, 0.98);
+    CGContextSetRGBStrokeColor(ctx, accent.r, accent.g, accent.b, 0.95);
+    CGContextSetLineWidth(ctx, 3.0);
+    CGContextStrokeRect(ctx, CGRectMake(x, y, width, height));
+    draw_centered(ctx, label, x + width / 2.0,
+                  y + height / 2.0 - 10, 4, accent);
+}
+
+static void draw_menu_header(CGContextRef ctx, const char *title, Color color) {
+    draw_centered(ctx, title, WINDOW_W / 2.0, 610, 6, color);
+    fill_rect(ctx, 145, 580, 380, 3, color, 0.72);
+}
+
+static void render_main_menu(CGContextRef ctx) {
+    draw_menu_background(ctx);
+    draw_centered(ctx, "ADHDTETRIS", WINDOW_W / 2.0, 585, 7,
+                  (Color){0.24, 0.88, 0.96});
+    draw_centered(ctx, "CHAOS EDITION", WINDOW_W / 2.0, 535, 2,
+                  (Color){0.66, 0.74, 0.88});
+    draw_menu_button(ctx, 185, 380, 300, 72, "PLAY",
+                     (Color){0.34, 0.94, 0.54});
+    draw_menu_button(ctx, 185, 280, 300, 72, "SHOP",
+                     (Color){1.0, 0.70, 0.20});
+    draw_menu_button(ctx, 185, 180, 300, 72, "SETTINGS",
+                     (Color){0.48, 0.66, 1.0});
+    char best_text[40];
+    snprintf(best_text, sizeof(best_text), "BEST %d", high_score);
+    draw_centered(ctx, best_text, WINDOW_W / 2.0, 105, 3,
+                  (Color){1.0, 0.88, 0.34});
+    draw_centered(ctx, "ENTER PLAY   Q QUIT", WINDOW_W / 2.0, 52, 2,
+                  (Color){0.42, 0.50, 0.64});
+}
+
+static void draw_shop_card(CGContextRef ctx, double y, const char *title,
+                           const char *price, const char *detail, Color accent) {
+    Color panel = {0.055, 0.075, 0.12};
+    fill_rect(ctx, 95, y, 480, 135, accent, 0.15);
+    fill_rect(ctx, 101, y + 6, 468, 123, panel, 0.98);
+    CGContextSetRGBStrokeColor(ctx, accent.r, accent.g, accent.b, 0.88);
+    CGContextSetLineWidth(ctx, 3.0);
+    CGContextStrokeRect(ctx, CGRectMake(95, y, 480, 135));
+    draw_text(ctx, title, 125, y + 91, 3, accent);
+    draw_text(ctx, detail, 125, y + 59, 2, (Color){0.76, 0.82, 0.92});
+    draw_text(ctx, price, 458, y + 89, 3, (Color){1.0, 0.92, 0.44});
+    draw_text(ctx, "COMING SOON", 125, y + 25, 2,
+              (Color){0.48, 0.55, 0.68});
+}
+
+static void render_shop_menu(CGContextRef ctx) {
+    draw_menu_background(ctx);
+    draw_menu_header(ctx, "SHOP", (Color){1.0, 0.70, 0.20});
+    draw_shop_card(ctx, 355, "REMOVE ADS", "3 USD",
+                   "PLAY WITHOUT ADS", (Color){1.0, 0.48, 0.22});
+    draw_shop_card(ctx, 185, "ROCKET LUCK X2", "1 USD",
+                   "DOUBLE ROCKET CHANCE", (Color){0.72, 0.44, 1.0});
+    draw_menu_button(ctx, 55, 50, 160, 55, "BACK",
+                     (Color){0.52, 0.62, 0.78});
+    draw_text(ctx, "VISUAL OFFERS ONLY", 355, 66, 2,
+              (Color){0.42, 0.50, 0.64});
+}
+
+static void render_settings_menu(CGContextRef ctx) {
+    draw_menu_background(ctx);
+    draw_menu_header(ctx, "SETTINGS", (Color){0.48, 0.66, 1.0});
+    Color panel = {0.055, 0.075, 0.12};
+    Color status = sound_muted ? (Color){1.0, 0.38, 0.30}
+                               : (Color){0.34, 0.94, 0.54};
+    fill_rect(ctx, 125, 420, 420, 105, panel, 0.98);
+    CGContextSetRGBStrokeColor(ctx, status.r, status.g, status.b, 0.86);
+    CGContextSetLineWidth(ctx, 3.0);
+    CGContextStrokeRect(ctx, CGRectMake(125, 420, 420, 105));
+    draw_text(ctx, "SOUND", 155, 472, 3, (Color){0.88, 0.93, 1.0});
+    draw_text(ctx, sound_muted ? "MUTED" : "ON", 420, 472, 3, status);
+    draw_menu_button(ctx, 185, 300, 300, 78,
+                     sound_muted ? "UNMUTE" : "MUTE", status);
+    draw_centered(ctx, "SETTING SAVED AUTOMATICALLY", WINDOW_W / 2.0,
+                  250, 2, (Color){0.46, 0.54, 0.68});
+    draw_menu_button(ctx, 55, 50, 160, 55, "BACK",
+                     (Color){0.52, 0.62, 0.78});
+}
+
+static void render_game(CGContextRef ctx);
+
+static void render_current_screen(CGContextRef ctx) {
+    if (screen_mode == SCREEN_MAIN_MENU) render_main_menu(ctx);
+    else if (screen_mode == SCREEN_SHOP) render_shop_menu(ctx);
+    else if (screen_mode == SCREEN_SETTINGS) render_settings_menu(ctx);
+    else render_game(ctx);
+}
+
 static void render_game(CGContextRef ctx) {
     Color background = {0.035, 0.045, 0.075};
     Color panel = {0.065, 0.085, 0.13};
@@ -2313,6 +2519,7 @@ static void render_game(CGContextRef ctx) {
     draw_text(ctx, "E       FOCUS", side_x, 74, 2,
               focus_charge >= 100.0 || focus_time > 0.0
                   ? (Color){1.0, 0.84, 0.24} : muted);
+    draw_text(ctx, "ESC     MENU", side_x, 54, 2, muted);
     Color meter_border = {0.22, 0.28, 0.38};
     fill_rect(ctx, side_x, 18, 220, 14, meter_border, 1.0);
     double meter_ratio = focus_time > 0.0 ? focus_time / 8.0
@@ -2344,7 +2551,7 @@ static void draw_view(id self, SEL command, CGRect dirty_rect) {
                                                     sel_registerName("currentContext"));
     CGContextRef context = ((CGContextRef (*)(id, SEL))objc_msgSend)(
         ns_context, sel_registerName("CGContext"));
-    render_game(context);
+    render_current_screen(context);
 }
 
 static signed char accepts_first_responder(id self, SEL command) {
@@ -2363,7 +2570,8 @@ static void send_void(id object, const char *selector) {
 int main(void) {
     srand((unsigned int)time(NULL));
     load_high_score();
-    reset_game();
+    load_settings();
+    screen_mode = SCREEN_MAIN_MENU;
 
     Class pool_class = (Class)objc_getClass("NSAutoreleasePool");
     id outer_pool = send_id(send_id((id)pool_class, "alloc"), "init");
@@ -2430,6 +2638,10 @@ int main(void) {
                 unsigned short key = ((unsigned short (*)(id, SEL))objc_msgSend)(
                     event, sel_registerName("keyCode"));
                 handle_key(key);
+            } else if (type == 1) {
+                CGPoint point = ((CGPoint (*)(id, SEL))objc_msgSend)(
+                    event, sel_registerName("locationInWindow"));
+                handle_click(point);
             }
             ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("sendEvent:"), event);
         }
@@ -2453,5 +2665,6 @@ int main(void) {
     send_void(window, "release");
     send_void(outer_pool, "drain");
     save_high_score();
+    save_settings();
     return 0;
 }
