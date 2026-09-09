@@ -4,6 +4,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,11 @@ enum {
     SPECIAL_CREEPER, SPECIAL_CHOCOLATE
 };
 enum { SCREEN_MAIN_MENU, SCREEN_SHOP, SCREEN_SETTINGS, SCREEN_GAME };
+enum {
+    SFX_LINE_CLEAR, SFX_BLAST, SFX_LASER, SFX_EVENT,
+    SFX_ROCKET, SFX_POWER, SFX_MELT, SFX_DANGER, SFX_LAUNCH,
+    SFX_COUNT
+};
 
 static const int WINDOW_W = 670;
 static const int WINDOW_H = 720;
@@ -82,6 +88,9 @@ static int high_score;
 static bool high_score_dirty;
 static int screen_mode = SCREEN_MAIN_MENU;
 static bool sound_muted;
+static id game_sounds[SFX_COUNT];
+static double sound_last_played[SFX_COUNT];
+static bool game_audio_initialized;
 static bool paused;
 static bool game_over;
 static bool running = true;
@@ -176,6 +185,161 @@ static double random_unit(void) {
     return (double)rand() / (double)RAND_MAX;
 }
 
+static void write_wav_u16(unsigned char *bytes, size_t offset, uint16_t value) {
+    bytes[offset] = (unsigned char)(value & 0xffu);
+    bytes[offset + 1] = (unsigned char)((value >> 8) & 0xffu);
+}
+
+static void write_wav_u32(unsigned char *bytes, size_t offset, uint32_t value) {
+    bytes[offset] = (unsigned char)(value & 0xffu);
+    bytes[offset + 1] = (unsigned char)((value >> 8) & 0xffu);
+    bytes[offset + 2] = (unsigned char)((value >> 16) & 0xffu);
+    bytes[offset + 3] = (unsigned char)((value >> 24) & 0xffu);
+}
+
+static double sound_sample(int effect, double time, double duration,
+                           uint32_t *noise_state) {
+    const double pi = 3.14159265358979323846;
+    double attack = time < 0.012 ? time / 0.012 : 1.0;
+    double fade = 1.0 - time / duration;
+    if (fade < 0.0) fade = 0.0;
+    *noise_state = *noise_state * 1664525u + 1013904223u;
+    double noise = ((double)((*noise_state >> 8) & 0xffffu) / 32767.5) - 1.0;
+    double value = 0.0;
+
+    if (effect == SFX_LINE_CLEAR) {
+        int step = (int)(time / (duration / 3.0));
+        if (step > 2) step = 2;
+        const double notes[3] = {523.25, 659.25, 880.0};
+        double local = time - step * (duration / 3.0);
+        value = sin(2.0 * pi * notes[step] * local) * 0.72;
+        value += sin(2.0 * pi * notes[step] * 2.0 * local) * 0.12;
+        fade = 1.0 - local / (duration / 3.0);
+    } else if (effect == SFX_BLAST || effect == SFX_ROCKET) {
+        double start = effect == SFX_ROCKET ? 125.0 : 155.0;
+        double sweep = effect == SFX_ROCKET ? 82.0 : 105.0;
+        double phase = 2.0 * pi * (start * time - sweep * time * time);
+        value = sin(phase) * 0.72 + noise * 0.25;
+        value += sin(2.0 * pi * 48.0 * time) * 0.20;
+        fade *= fade;
+    } else if (effect == SFX_LASER) {
+        double phase = 2.0 * pi * (1250.0 * time - 1850.0 * time * time);
+        value = sin(phase) * 0.66 + sin(phase * 0.51) * 0.22;
+        fade *= fade;
+    } else if (effect == SFX_EVENT || effect == SFX_POWER) {
+        const double notes[3] = {392.0, 587.33, 783.99};
+        int step = (int)(time / (duration / 3.0));
+        if (step > 2) step = 2;
+        double local = time - step * (duration / 3.0);
+        double frequency = effect == SFX_POWER ? notes[step] * 1.25 : notes[step];
+        value = sin(2.0 * pi * frequency * local) * 0.60;
+        value += sin(2.0 * pi * frequency * 2.01 * local) * 0.13;
+        fade = 1.0 - local / (duration / 3.0);
+    } else if (effect == SFX_MELT) {
+        double wobble = 340.0 - time * 360.0 + sin(time * 55.0) * 38.0;
+        value = sin(2.0 * pi * wobble * time) * 0.55;
+        value += sin(2.0 * pi * (wobble * 0.5) * time) * 0.20;
+        fade *= fade;
+    } else if (effect == SFX_DANGER) {
+        double pulse = fmod(time, 0.16) < 0.075 ? 1.0 : 0.28;
+        value = sin(2.0 * pi * 178.0 * time) * 0.60 * pulse;
+        value += sin(2.0 * pi * 89.0 * time) * 0.18;
+    } else if (effect == SFX_LAUNCH) {
+        double phase = 2.0 * pi * (190.0 * time + 720.0 * time * time);
+        value = sin(phase) * 0.48 + noise * 0.15;
+        fade = sqrt(fade);
+    }
+    value *= attack * fade;
+    if (value > 1.0) value = 1.0;
+    if (value < -1.0) value = -1.0;
+    return value;
+}
+
+static id create_game_sound(int effect) {
+    static const double durations[SFX_COUNT] = {
+        0.27, 0.42, 0.25, 0.48, 0.52, 0.36, 0.34, 0.44, 0.30
+    };
+    const uint32_t sample_rate = 22050;
+    uint32_t sample_count = (uint32_t)(durations[effect] * sample_rate);
+    uint32_t data_size = sample_count * 2u;
+    size_t wav_size = 44u + data_size;
+    unsigned char *wav = calloc(wav_size, 1);
+    if (!wav) return (id)0;
+
+    memcpy(wav, "RIFF", 4);
+    write_wav_u32(wav, 4, 36u + data_size);
+    memcpy(wav + 8, "WAVEfmt ", 8);
+    write_wav_u32(wav, 16, 16);
+    write_wav_u16(wav, 20, 1);
+    write_wav_u16(wav, 22, 1);
+    write_wav_u32(wav, 24, sample_rate);
+    write_wav_u32(wav, 28, sample_rate * 2u);
+    write_wav_u16(wav, 32, 2);
+    write_wav_u16(wav, 34, 16);
+    memcpy(wav + 36, "data", 4);
+    write_wav_u32(wav, 40, data_size);
+
+    uint32_t noise_state = 0x9e3779b9u ^ (uint32_t)(effect * 7919);
+    for (uint32_t i = 0; i < sample_count; ++i) {
+        double time = (double)i / sample_rate;
+        double sample = sound_sample(effect, time, durations[effect], &noise_state);
+        int16_t pcm = (int16_t)(sample * 15000.0);
+        write_wav_u16(wav, 44u + i * 2u, (uint16_t)pcm);
+    }
+
+    id data = ((id (*)(id, SEL, const void *, unsigned long))objc_msgSend)(
+        (id)objc_getClass("NSData"), sel_registerName("dataWithBytes:length:"),
+        wav, (unsigned long)wav_size);
+    id sound = ((id (*)(id, SEL, id))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSSound"),
+                                        sel_registerName("alloc")),
+        sel_registerName("initWithData:"), data);
+    free(wav);
+    if (sound) {
+        float volume = effect == SFX_BLAST || effect == SFX_ROCKET ? 0.74f : 0.62f;
+        ((void (*)(id, SEL, float))objc_msgSend)(sound,
+                                                sel_registerName("setVolume:"),
+                                                volume);
+    }
+    return sound;
+}
+
+static void initialize_game_audio(void) {
+    if (game_audio_initialized) return;
+    game_audio_initialized = true;
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        sound_last_played[i] = -100.0;
+        game_sounds[i] = create_game_sound(i);
+    }
+}
+
+static void play_game_sound(int effect) {
+    if (sound_muted || effect < 0 || effect >= SFX_COUNT) return;
+    initialize_game_audio();
+    static const double cooldowns[SFX_COUNT] = {
+        0.08, 0.10, 0.08, 0.20, 0.14, 0.10, 0.18, 0.22, 0.18
+    };
+    if (visual_time - sound_last_played[effect] < cooldowns[effect]) return;
+    id sound = game_sounds[effect];
+    if (!sound) return;
+    sound_last_played[effect] = visual_time;
+    ((void (*)(id, SEL))objc_msgSend)(sound, sel_registerName("stop"));
+    ((signed char (*)(id, SEL))objc_msgSend)(sound, sel_registerName("play"));
+}
+
+static void shutdown_game_audio(void) {
+    if (!game_audio_initialized) return;
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        if (!game_sounds[i]) continue;
+        ((void (*)(id, SEL))objc_msgSend)(game_sounds[i],
+                                          sel_registerName("stop"));
+        ((void (*)(id, SEL))objc_msgSend)(game_sounds[i],
+                                          sel_registerName("release"));
+        game_sounds[i] = (id)0;
+    }
+    game_audio_initialized = false;
+}
+
 static bool get_high_score_path(char *path, size_t capacity, bool temporary) {
     const char *user_home = getenv("HOME");
     if (!user_home || !user_home[0]) return false;
@@ -250,6 +414,7 @@ static void start_minecraft_event(void) {
     minecraft_creeper_timer = 5.0;
     shake_time = 0.42;
     if (shake_strength < 9.0) shake_strength = 9.0;
+    play_game_sound(SFX_EVENT);
     for (int i = 0; i < 84; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
@@ -275,6 +440,7 @@ static void start_chocolate_event(void) {
     chocolate_melt_timer = 5.0;
     shake_time = 0.34;
     if (shake_strength < 7.5) shake_strength = 7.5;
+    play_game_sound(SFX_EVENT);
     for (int i = 0; i < 72; ++i) {
         Particle *p = &particles[particle_cursor++ % MAX_PARTICLES];
         p->active = true;
@@ -292,6 +458,18 @@ static void start_chocolate_event(void) {
 }
 
 static void start_special_impact(int x, int y, int special, int variant) {
+    if (special == SPECIAL_BOMB || special == SPECIAL_CREEPER)
+        play_game_sound(SFX_BLAST);
+    else if (special == SPECIAL_ROCKET || special == SPECIAL_METEOR)
+        play_game_sound(SFX_ROCKET);
+    else if (special == SPECIAL_LASER || special == SPECIAL_DIAGONAL ||
+             special == SPECIAL_DRILL || special == SPECIAL_THUNDER)
+        play_game_sound(SFX_LASER);
+    else if (special == SPECIAL_CHOCOLATE)
+        play_game_sound(SFX_MELT);
+    else
+        play_game_sound(SFX_POWER);
+
     Shockwave *wave = &shockwaves[wave_cursor++ % MAX_WAVES];
     wave->active = true;
     wave->x = BOARD_X + (x + 0.5) * CELL;
@@ -462,6 +640,7 @@ static void check_perfect_clear(void) {
                       BOARD_Y + ROWS * CELL / 2.0,
                       bonus, (Color){1.0, 0.86, 0.24});
     perfect_clear_timer = 1.8;
+    play_game_sound(SFX_EVENT);
     rescue_shield = true;
     shield_banner_timer = 2.0;
     perfect_clear_candidate = false;
@@ -497,6 +676,7 @@ static void trigger_garbage_surge(void) {
     danger_flash_time = 0.22;
     shake_time = 0.34;
     if (shake_strength < 8.0) shake_strength = 8.0;
+    play_game_sound(SFX_DANGER);
     for (int x = 0; x < COLS; ++x) {
         if (board[0][x]) {
             if (!activate_rescue_shield()) {
@@ -601,6 +781,7 @@ static void spawn_piece(void) {
         rocket.mode = 1;
         rocket.column = choose_rocket_column();
         rocket.y = -1.2;
+        play_game_sound(SFX_LAUNCH);
         --meteor_shower_remaining;
         advance_next_piece();
         return;
@@ -611,6 +792,7 @@ static void spawn_piece(void) {
         rocket.mode = 1;
         rocket.column = choose_rocket_column();
         rocket.y = -1.2;
+        play_game_sound(SFX_LAUNCH);
         advance_next_piece();
         return;
     }
@@ -619,6 +801,7 @@ static void spawn_piece(void) {
         rocket.mode = 0;
         rocket.column = choose_rocket_column();
         rocket.y = -1.2;
+        play_game_sound(SFX_LAUNCH);
         advance_next_piece();
         return;
     }
@@ -636,6 +819,7 @@ static void spawn_piece(void) {
         flash_kind = SPECIAL_THUNDER;
         shake_time = 0.24;
         if (shake_strength < 5.5) shake_strength = 5.5;
+        play_game_sound(SFX_EVENT);
         if (next_special_type == SPECIAL_NONE) {
             next_special_index = rand() % 4;
             next_special_type = random_special_type();
@@ -1007,6 +1191,7 @@ static int clear_full_lines(void) {
 static int resolve_completed_lines(void) {
     int cleared = clear_full_lines();
     if (cleared == 0) return 0;
+    play_game_sound(SFX_LINE_CLEAR);
     perfect_clear_candidate = true;
     static const int rewards[5] = {0, 100, 300, 500, 800};
     int reward_index = cleared > 4 ? 4 : cleared;
@@ -1203,6 +1388,7 @@ static void spawn_creeper(void) {
     creeper.active = true;
     creeper.column = rand() % COLS;
     creeper.y = -1.0;
+    play_game_sound(SFX_DANGER);
 }
 
 static void spawn_creeper_trail(void) {
@@ -1565,6 +1751,7 @@ static void handle_key(unsigned short key) {
         focus_charge = 0.0;
         focus_time = 8.0;
         chain_display_timer = 1.15;
+        play_game_sound(SFX_POWER);
         return;
     }
     if (normal_clear_active) return;
@@ -1621,6 +1808,7 @@ static void handle_click(CGPoint point) {
         if (point_in_button(point, 185, 300, 300, 78)) {
             sound_muted = !sound_muted;
             save_settings();
+            if (!sound_muted) play_game_sound(SFX_EVENT);
         } else if (point_in_button(point, 55, 50, 160, 55)) {
             screen_mode = SCREEN_MAIN_MENU;
         }
@@ -2977,7 +3165,11 @@ int main(void) {
                     event, sel_registerName("locationInWindow"));
                 handle_click(point);
             }
-            ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("sendEvent:"), event);
+            /* Game keys are fully handled above. Sending them to NSView again
+               makes Cocoa emit the system error beep for every press. */
+            if (type != 10)
+                ((void (*)(id, SEL, id))objc_msgSend)(
+                    app, sel_registerName("sendEvent:"), event);
         }
 
         uint64_t now = monotonic_ns();
@@ -2997,6 +3189,7 @@ int main(void) {
     ((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("orderOut:"), (id)0);
     send_void(view, "release");
     send_void(window, "release");
+    shutdown_game_audio();
     send_void(outer_pool, "drain");
     save_high_score();
     save_settings();
